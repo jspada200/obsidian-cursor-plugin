@@ -1,0 +1,58 @@
+# Build and publish a GitHub Release when a version tag is pushed (e.g. 1.0.1).
+# 1) Set "version" in manifest.json to match the tag, commit, push.
+# 2) git tag 1.0.1 && git push origin 1.0.1
+# Tags must be X.X.X (three dot-separated non-negative integers). No "v" prefix.
+# The workflow fails if the tag is malformed or manifest "version" does not match the tag.
+name: Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check manifest version matches tag
+        run: |
+          TAG_VER="${{ github.ref_name }}"
+          if [[ ! "$TAG_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag must be X.X.X (e.g. 1.0.0) with no prefix or suffix; got: $TAG_VER"
+            exit 1
+          fi
+          MAN_VER=$(jq -r .version manifest.json)
+          if [ "$TAG_VER" != "$MAN_VER" ]; then
+            echo "::error::Tag $TAG_VER does not match manifest.json version '$MAN_VER'. Update manifest.json, commit, then tag again."
+            exit 1
+          fi
+          echo "Manifest version $MAN_VER matches tag $TAG_VER"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Create plugin zip
+        run: zip -r "obsidian-cursor-plugin.zip" main.js manifest.json styles.css
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.ref_name }}"
+          generate_release_notes: true
+          files: obsidian-cursor-plugin.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
