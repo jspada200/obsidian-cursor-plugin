@@ -2,7 +2,7 @@ import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { AcpClient, type AcpConnectProgressPhase } from "./acp/client";
 import { expandAgentPath, sanitizeModelId } from "./agentModels";
 import { AgentFileLogger, revealAgentLogFile } from "./logging/agentFileLog";
-import { DEFAULT_SETTINGS, type AgentMode, type CursorAgentSettings } from "./settings";
+import { DEFAULT_SETTINGS, normalizeAgentMode, type AgentMode, type CursorAgentSettings } from "./settings";
 import { CursorChatView, VIEW_TYPE_CURSOR_AGENT } from "./ui/CursorChatView";
 import { CursorAgentSettingTab } from "./ui/CursorAgentSettingTab";
 import { getVaultOsPath } from "./util/vaultPath";
@@ -334,7 +334,9 @@ export class CursorAgentPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const raw = (await this.loadData()) as Partial<PluginData> | null;
+		const rawMode = raw?.settings?.defaultMode;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, raw?.settings ?? {});
+		this.settings.defaultMode = normalizeAgentMode(this.settings.defaultMode as string);
 		if (raw?.chat && typeof raw.chat === "object" && !Array.isArray(raw.chat)) {
 			const n = normalizePersistedChatData(raw.chat);
 			this.persistedSnapshot = {
@@ -344,6 +346,9 @@ export class CursorAgentPlugin extends Plugin {
 			};
 		} else {
 			this.persistedSnapshot = undefined;
+		}
+		if (rawMode !== undefined && String(rawMode) !== this.settings.defaultMode) {
+			await this.saveData(this.buildPluginDataObjectForDisk());
 		}
 	}
 

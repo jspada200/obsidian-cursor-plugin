@@ -1,7 +1,7 @@
 import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import { buildVaultContextBlock, searchNotesByNameOrTag } from "../context/buildContext";
 import type { CursorAgentPlugin, PersistedChatTabs } from "../plugin";
-import type { AgentMode } from "../settings";
+import { normalizeAgentMode, type AgentMode } from "../settings";
 import { CreatePlanModal, PermissionModal, AskQuestionModal } from "./modals";
 import type { PermissionChoice } from "./modals";
 import { getVaultOsPath } from "../util/vaultPath";
@@ -70,7 +70,7 @@ export class CursorChatView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.plugin.setAcpChatView(this);
-		this.mode = this.plugin.settings.defaultMode;
+		this.mode = normalizeAgentMode(this.plugin.settings.defaultMode as string);
 		this.model = sanitizeModelId(this.plugin.settings.defaultModel);
 
 		/* Always rehydrate from the plugin’s snapshot (from disk) — do not require empty in-memory
@@ -127,8 +127,11 @@ export class CursorChatView extends ItemView {
 		const composerFooter = surface.createDiv({ cls: "cursor-agent-composer-footer" });
 		const footerLeft = composerFooter.createDiv({ cls: "cursor-agent-composer-footer-left" });
 		this.modeSelectRef = footerLeft.createEl("select", { cls: "cursor-agent-pill-select" });
-		for (const m of ["agent", "plan", "ask"] as const) {
-			this.modeSelectRef.createEl("option", { text: m, value: m });
+		for (const m of [
+			{ v: "ask" as const, t: "Ask" },
+			{ v: "agent" as const, t: "Agent" },
+		]) {
+			this.modeSelectRef.createEl("option", { text: m.t, value: m.v });
 		}
 		this.modeSelectRef.value = this.mode;
 		this.modeSelectRef.addEventListener("change", async () => {

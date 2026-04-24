@@ -92,6 +92,11 @@ npx tsc -noEmit -skipLibCheck
 - **“ACP” / JSON-RPC errors** — Open **Developer Tools** and check the console for `[Cursor Agent]` and `[cursor-agent stderr]`. Error notices now include recent CLI stderr when available.
 - **Sessions after restart** — Persisted tab rows may reference old server session IDs; sending a message may create a new session if the CLI process restarted.
 
+
+## Current limitations
+- No plan mode
+- No multiple-choice dialogs when context needs refinement
+
 ## License
 
 MIT (see `package.json`).

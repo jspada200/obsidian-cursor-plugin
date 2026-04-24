@@ -37,7 +37,7 @@ export interface AcpClientHooks {
 export interface AcpSpawnOptions {
 	agentPath: string;
 	workspaceRoot: string;
-	mode: "agent" | "ask" | "plan";
+	mode: "agent" | "ask";
 	model: string;
 	trustWorkspace: boolean;
 	extraArgs: string[];
@@ -94,7 +94,6 @@ export class AcpClient {
 		const args: string[] = ["--workspace", opt.workspaceRoot];
 		if (opt.trustWorkspace) args.push("--trust");
 		if (opt.mode === "ask") args.push("--mode", "ask");
-		else if (opt.mode === "plan") args.push("--mode", "plan");
 		if (opt.model.trim()) args.push("--model", opt.model.trim());
 		args.push(...opt.extraArgs.filter((a) => a.length > 0));
 		args.push("acp");

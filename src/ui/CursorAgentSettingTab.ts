@@ -58,9 +58,8 @@ export class CursorAgentSettingTab extends PluginSettingTab {
 			.setName("Default mode")
 			.addDropdown((d) =>
 				d
-					.addOption("agent", "Agent")
-					.addOption("plan", "Plan")
 					.addOption("ask", "Ask")
+					.addOption("agent", "Agent")
 					.setValue(this.plugin.settings.defaultMode)
 					.onChange(async (v) => {
 						this.plugin.settings.defaultMode = v as AgentMode;

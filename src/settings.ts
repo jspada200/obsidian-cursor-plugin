@@ -1,4 +1,11 @@
-export type AgentMode = "agent" | "ask" | "plan";
+export type AgentMode = "agent" | "ask";
+
+/** Maps legacy `plan` to `ask` and invalid values to `agent`. */
+export function normalizeAgentMode(m: string | undefined): AgentMode {
+	if (m === "ask" || m === "agent") return m;
+	if (m === "plan") return "ask";
+	return "agent";
+}
 
 export interface CursorAgentSettings {
 	agentBinaryPath: string;
