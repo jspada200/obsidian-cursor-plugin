@@ -54,11 +54,44 @@
 .cursor-agent-topbar {
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
 	padding: 5px 10px 4px;
 	border-bottom: 1px solid var(--ca-border, var(--background-modifier-border));
 	flex-shrink: 0;
 	background: var(--ca-raised, var(--background-primary));
+}
+
+/* Pinned right: beta + actions (margin-left: auto keeps this flush right). */
+.cursor-agent-topbar-right {
+	display: flex;
+	align-items: center;
+	flex-wrap: nowrap;
+	gap: 4px;
+	flex: 0 0 auto;
+	margin-left: auto;
+}
+
+.cursor-agent-beta-pill {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	min-height: 22px;
+	padding: 2px 8px;
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	line-height: 1.2;
+	/* Explicit fallbacks so the pill is visible even if --ca-* don’t load from theme yet */
+	color: var(--ca-accent, #8b5cf6);
+	background: var(--ca-accent-dim, rgba(139, 92, 246, 0.2));
+	border: 1px solid var(--ca-border, var(--background-modifier-border));
+	border-radius: 999px;
+	-webkit-user-select: none;
+	user-select: none;
+	pointer-events: none;
+	white-space: nowrap;
 }
 
 .cursor-agent-tabs-row {

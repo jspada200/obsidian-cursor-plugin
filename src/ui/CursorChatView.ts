@@ -87,11 +87,13 @@ export class CursorChatView extends ItemView {
 
 		const topbar = root.createDiv({ cls: "cursor-agent-topbar" });
 		this.tabsRowEl = topbar.createDiv({ cls: "cursor-agent-tabs-row" });
-		topbar.createEl("button", { cls: "cursor-agent-topbar-btn", attr: { "aria-label": "Save whole session as note", type: "button" } }, (b) => {
+		const topbarRight = topbar.createDiv({ cls: "cursor-agent-topbar-right" });
+		topbarRight.createSpan({ cls: "cursor-agent-beta-pill", text: "Beta" });
+		topbarRight.createEl("button", { cls: "cursor-agent-topbar-btn", attr: { "aria-label": "Save whole session as note", type: "button" } }, (b) => {
 			setIcon(b, "download");
 			b.addEventListener("click", () => void this.saveSessionAsNote());
 		});
-		topbar.createEl("button", { cls: "cursor-agent-topbar-btn", attr: { "aria-label": "New chat", type: "button" } }, (b) => {
+		topbarRight.createEl("button", { cls: "cursor-agent-topbar-btn", attr: { "aria-label": "New chat", type: "button" } }, (b) => {
 			setIcon(b, "plus");
 			b.addEventListener("click", () => this.addTab());
 		});
