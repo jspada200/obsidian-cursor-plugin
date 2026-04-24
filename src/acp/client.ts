@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import * as fs from "fs";
 import * as readline from "readline";
+import { agentPathRequiresWindowsShell } from "../agentModels";
 import { augmentPathEnv } from "../util/agentEnv";
 import type { AgentFileLogger } from "../logging/agentFileLog";
 import type { JsonRpcRequest, JsonRpcResponse, SessionPromptPart } from "./types";
@@ -106,6 +107,7 @@ export class AcpClient {
 		this.proc = spawn(opt.agentPath, args, {
 			env: mergedEnv,
 			stdio: ["pipe", "pipe", "pipe"],
+			...(agentPathRequiresWindowsShell(opt.agentPath) ? { shell: true } : {}),
 		});
 
 		this.proc.stderr?.on("data", (chunk: Buffer) => {

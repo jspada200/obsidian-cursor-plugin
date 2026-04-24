@@ -98,6 +98,7 @@ npx tsc -noEmit -skipLibCheck
 
 ## Troubleshooting
 
+- **Windows — default path and `agent.cmd`** — If you leave **Agent binary path** empty, the plugin uses `%LOCALAPPDATA%\cursor-agent\agent.cmd` (the usual Cursor CLI shim on Windows), not `~/.local/bin/agent`. If you set the path yourself, use the full path to `agent.cmd` (or another real executable). On recent Node.js versions, `.cmd` / `.bat` / `.ps1` shims must be launched with a shell; the plugin does that automatically for those extensions.
 - **`agent: command not found` in Terminal** — The installer often puts the binary at `~/.local/bin/agent`, which may not be on your shell `PATH`. Either add that directory to `PATH` in `~/.zshrc`, or log in with the full path:  
   `~/.local/bin/agent login`  
   In the plugin, set **Agent binary path** to that full path (the default is already `~/.local/bin/agent` expanded to an absolute path, which does **not** rely on `PATH`).

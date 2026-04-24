@@ -22,7 +22,11 @@ export class CursorAgentSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Agent binary path")
-			.setDesc("Leave empty to use ~/.local/bin/agent.")
+			.setDesc(
+				process.platform === "win32"
+					? "Leave empty to use %LOCALAPPDATA%\\cursor-agent\\agent.cmd (Cursor’s Windows shim)."
+					: "Leave empty to use ~/.local/bin/agent."
+			)
 			.addText((t) =>
 				t
 					.setPlaceholder("~/.local/bin/agent")

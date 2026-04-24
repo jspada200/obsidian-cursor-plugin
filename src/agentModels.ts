@@ -5,14 +5,35 @@ import * as path from "path";
 import type { AgentFileLogger } from "./logging/agentFileLog";
 import { augmentPathEnv } from "./util/agentEnv";
 
+/** Default install layout for the Cursor Agent CLI on Windows (see `%LOCALAPPDATA%\\cursor-agent\\`). */
+function defaultAgentPathWhenUnset(): string {
+	if (process.platform === "win32") {
+		const localAppData =
+			process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
+		return path.join(localAppData, "cursor-agent", "agent.cmd");
+	}
+	return path.join(os.homedir(), ".local", "bin", "agent");
+}
+
 export function expandAgentPath(configured: string): string {
 	const p = configured.trim();
 	if (p) return p.replace(/^~(?=$|[\\/])/, os.homedir());
-	return path.join(os.homedir(), ".local", "bin", "agent");
+	return defaultAgentPathWhenUnset();
+}
+
+/**
+ * Node 22+ on Windows: `spawn` / `execFile` on `.cmd`, `.bat`, or `.ps1` without `shell: true`
+ * fails with `EINVAL` (security-related behavior). Cursor’s Windows shim is usually `agent.cmd`.
+ */
+export function agentPathRequiresWindowsShell(agentPath: string): boolean {
+	if (process.platform !== "win32") return false;
+	return /\.(cmd|bat|ps1)$/i.test(agentPath.trim());
 }
 
 export function agentBinaryExists(agentPath: string): boolean {
 	try {
+		if (!fs.existsSync(agentPath)) return false;
+		if (process.platform === "win32") return true;
 		fs.accessSync(agentPath, fs.constants.X_OK);
 		return true;
 	} catch {
@@ -76,6 +97,7 @@ export async function fetchAvailableModels(
 		timeout: 45000,
 		maxBuffer: 4 * 1024 * 1024,
 		env,
+		...(agentPathRequiresWindowsShell(agentPath) ? { shell: true as const } : {}),
 	};
 
 	const run = (args: string[]) =>
