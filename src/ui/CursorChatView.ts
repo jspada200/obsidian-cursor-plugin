@@ -21,6 +21,7 @@ import {
 	formatSessionAsMarkdown,
 } from "../util/chatNoteExport";
 import { titleFromFirstUserMessage } from "../util/tabTitle";
+import { expandVaultNoteLineMarkers, tryOpenTranscriptVaultLink } from "../util/assistantVaultLinks";
 
 export const VIEW_TYPE_CURSOR_AGENT = "cursor-agent-chat-view";
 
@@ -380,8 +381,12 @@ export class CursorChatView extends ItemView {
 				});
 				continue;
 			}
-			const tab = this.tabsRowEl.createEl("button", {
-				cls: "cursor-agent-tab-pill" + (t.localId === this.activeTabId ? " is-active" : ""),
+			const wrap = this.tabsRowEl.createDiv({ cls: "cursor-agent-tab-wrap" });
+			const tab = wrap.createEl("button", {
+				cls:
+					"cursor-agent-tab-pill" +
+					(t.localId === this.activeTabId ? " is-active" : "") +
+					(this.tabs.length > 1 ? " has-hover-close" : ""),
 				text: t.title,
 				attr: { type: "button" },
 			});
@@ -401,6 +406,18 @@ export class CursorChatView extends ItemView {
 				this.renderTranscript();
 				void this.flushPersist();
 			});
+			if (this.tabs.length > 1) {
+				const closeBtn = wrap.createEl("button", {
+					cls: "cursor-agent-tab-close",
+					attr: { type: "button", "aria-label": "Close tab" },
+				});
+				setIcon(closeBtn, "x");
+				closeBtn.addEventListener("click", (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+					this.closeTab(t.localId);
+				});
+			}
 		}
 		if (this.editingTabId) {
 			requestAnimationFrame(() => {
@@ -435,8 +452,12 @@ export class CursorChatView extends ItemView {
 		void this.renderTranscriptImpl();
 	}
 
-	private markdownSourcePath(): string {
-		return this.app.workspace.getActiveFile()?.path ?? "";
+	/**
+	 * Resolves markdown links in the chat transcript as vault-root-relative (not relative to
+	 * whatever note is currently focused) so `VAULT:` / `[[...]]` / `[](path.md)` open the right file.
+	 */
+	private transcriptMarkdownSourcePath(): string {
+		return "";
 	}
 
 	private async saveSessionAsNote(): Promise<void> {
@@ -467,6 +488,8 @@ export class CursorChatView extends ItemView {
 		}
 		try {
 			const file = await createMarkdownNoteAtRoot(this.app, tab.title, assistantMarkdown);
+			const leaf = this.app.workspace.getLeaf("tab");
+			await leaf.openFile(file);
 			new Notice(`Saved: ${file.path}`);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
@@ -479,7 +502,7 @@ export class CursorChatView extends ItemView {
 		this.transcriptEl.empty();
 		const tab = this.activeTab();
 		if (!tab) return;
-		const sourcePath = this.markdownSourcePath();
+		const sourcePath = this.transcriptMarkdownSourcePath();
 
 		for (const m of tab.messages) {
 			const turn = this.transcriptEl.createDiv({
@@ -489,6 +512,7 @@ export class CursorChatView extends ItemView {
 
 			if (m.role === "assistant") {
 				const raw = m.content;
+				const toRender = expandVaultNoteLineMarkers(raw);
 				const shell = bubble.createDiv({ cls: "cursor-agent-assistant-shell" });
 				const toolbar = shell.createDiv({ cls: "cursor-agent-msg-toolbar" });
 				toolbar.createEl("button", { cls: "cursor-agent-msg-toolbtn", attr: { type: "button", "aria-label": "Copy this response" } }, (b) => {
@@ -513,7 +537,15 @@ export class CursorChatView extends ItemView {
 					});
 				});
 				const md = shell.createDiv({ cls: "cursor-agent-md markdown-rendered" });
-				await MarkdownRenderer.render(this.app, raw, md, sourcePath, this);
+				await MarkdownRenderer.render(this.app, toRender, md, sourcePath, this);
+				this.registerDomEvent(
+					md,
+					"click",
+					(e: MouseEvent) => {
+						tryOpenTranscriptVaultLink(e, this.app, sourcePath);
+					},
+					{ capture: true }
+				);
 				continue;
 			}
 
@@ -521,7 +553,16 @@ export class CursorChatView extends ItemView {
 				const details = bubble.createEl("details", { cls: "cursor-agent-thought-details" });
 				details.createEl("summary", { cls: "cursor-agent-thought-summary", text: "Thinking" });
 				const body = details.createDiv({ cls: "cursor-agent-thought-body markdown-rendered" });
-				await MarkdownRenderer.render(this.app, m.content, body, sourcePath, this);
+				const thoughtRender = expandVaultNoteLineMarkers(m.content);
+				await MarkdownRenderer.render(this.app, thoughtRender, body, sourcePath, this);
+				this.registerDomEvent(
+					body,
+					"click",
+					(e: MouseEvent) => {
+						tryOpenTranscriptVaultLink(e, this.app, sourcePath);
+					},
+					{ capture: true }
+				);
 				continue;
 			}
 

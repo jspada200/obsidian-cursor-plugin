@@ -74,8 +74,16 @@
 	-webkit-mask-image: linear-gradient(to right, black calc(100% - 10px), transparent);
 }
 
-.cursor-agent-tab-pill {
+.cursor-agent-tab-wrap {
+	position: relative;
 	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 180px;
+}
+
+.cursor-agent-tab-pill {
+	width: 100%;
+	box-sizing: border-box;
 	border: none;
 	border-radius: 5px;
 	padding: 3px 9px;
@@ -85,13 +93,47 @@
 	color: var(--ca-text-faint, var(--text-muted));
 	background: transparent;
 	cursor: pointer;
-	max-width: 160px;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
-.cursor-agent-tab-pill:hover {
+.cursor-agent-tab-wrap:hover .cursor-agent-tab-pill:not(.is-active) {
+	color: var(--ca-text, var(--text-normal));
+	background: var(--ca-raised-3, var(--background-modifier-hover));
+}
+
+.cursor-agent-tab-wrap:hover .cursor-agent-tab-pill.has-hover-close {
+	padding-right: 22px;
+}
+
+.cursor-agent-tab-close {
+	position: absolute;
+	right: 1px;
+	top: 50%;
+	z-index: 1;
+	width: 20px;
+	height: 20px;
+	margin-top: -10px;
+	padding: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	border-radius: 3px;
+	background: transparent;
+	color: var(--ca-text-muted, var(--text-muted));
+	cursor: pointer;
+	opacity: 0;
+	pointer-events: none;
+}
+
+.cursor-agent-tab-wrap:hover .cursor-agent-tab-close {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.cursor-agent-tab-close:hover {
 	color: var(--ca-text, var(--text-normal));
 	background: var(--ca-raised-3, var(--background-modifier-hover));
 }
@@ -350,6 +392,23 @@ input.cursor-agent-tab-pill.cursor-agent-tab-input {
 	max-width: 100%;
 	height: auto;
 	border-radius: 6px;
+}
+
+/* VAULT: line — rendered as a blockquote with a vault file link */
+.cursor-agent-turn-assistant .cursor-agent-md blockquote,
+.cursor-agent-turn-thought .cursor-agent-thought-body blockquote {
+	margin: 0.4em 0 0.65em;
+	padding: 0.4em 0.65em 0.5em 0.75em;
+	border-left: 3px solid var(--ca-accent, var(--interactive-accent));
+	background: var(--ca-raised, var(--background-modifier-border));
+	border-radius: 0 4px 4px 0;
+}
+.cursor-agent-vault-label {
+	letter-spacing: 0.02em;
+}
+.cursor-agent-turn-assistant .cursor-agent-md a,
+.cursor-agent-turn-thought .cursor-agent-thought-body a {
+	cursor: pointer;
 }
 
 .cursor-agent-turn-system .cursor-agent-bubble {

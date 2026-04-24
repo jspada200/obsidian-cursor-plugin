@@ -2,6 +2,11 @@
 
 ## NOTE: This plugin is in early development so bugs are sure to be found! Keep this in mind and if you encounter any issues, please let me know here: https://github.com/jspada200/obsidian-cursor-plugin/issues 🙏
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Cursor Agent Obsidian Plugin Demo" width="700"/>
+</p>
+
+
 This plugin is aimed at **[Cursor](https://cursor.com) subscribers** who already use Cursor and want the **same vault-scoped assistant inside [Obsidian](https://obsidian.md)**—so your notes stay in Obsidian while the **Cursor CLI** (`agent`) runs against the vault root as its workspace.
 
 It connects Obsidian to Cursor’s Agent through **ACP** (stdio JSON-RPC): **Ask**, **Plan**, and **Agent** modes, streaming replies, permission prompts when tools run, and optional plan / multiple-choice dialogs when the Agent requests them.
