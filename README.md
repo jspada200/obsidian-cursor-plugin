@@ -1,6 +1,8 @@
 # Cursor Agent (Obsidian plugin)
 
-This plugin is aimed at **[Cursor](https://cursor.com) subscribers** who already use Cursor’s Agent and want the **same vault-scoped assistant inside [Obsidian](https://obsidian.md)**—so your notes stay in Obsidian while the **Cursor CLI** (`agent`) runs against the vault root as its workspace.
+## NOTE: This plugin is in early development so bugs are sure to be found! Keep this in mind and if you encounter any issues, please let me know here: https://github.com/jspada200/obsidian-cursor-plugin/issues 🙏
+
+This plugin is aimed at **[Cursor](https://cursor.com) subscribers** who already use Cursor and want the **same vault-scoped assistant inside [Obsidian](https://obsidian.md)**—so your notes stay in Obsidian while the **Cursor CLI** (`agent`) runs against the vault root as its workspace.
 
 It connects Obsidian to Cursor’s Agent through **ACP** (stdio JSON-RPC): **Ask**, **Plan**, and **Agent** modes, streaming replies, permission prompts when tools run, and optional plan / multiple-choice dialogs when the Agent requests them.
 
@@ -32,14 +34,18 @@ Exact CLI availability and pricing are defined by Cursor; if `agent` cannot log 
 1. Install the Cursor CLI using Cursor’s installation instructions (`curl … | bash` or their current installer).
 2. In a terminal, run **`agent login`** and complete authentication.
 3. Confirm the binary exists, e.g. `~/.local/bin/agent` or `which agent`.
-4. Copy or symlink this plugin folder into your vault:
+
+Manual installation:
+
+1. Copy or symlink this plugin folder into your vault:
 
    `<Vault>/.obsidian/plugins/obsidian-cursor-plugin/`
 
    That folder must contain at least **`main.js`**, **`manifest.json`**, and **`styles.css`** (build first; see below).
 
-5. In Obsidian: **Settings → Community plugins → Safe mode off** → enable **Cursor Agent**.
-6. Optional: **Settings → Cursor Agent** — set binary path, defaults, trust (`--trust`), context toggles, and whether to write **`cursor-agent.log`** for debugging.
+2. In Obsidian: **Settings → Community plugins → Safe mode off** → enable **Cursor Agent**.
+
+3. Optional: **Settings → Cursor Agent** — set binary path, defaults, trust (`--trust`), context toggles, and whether to write **`cursor-agent.log`** for debugging.
 
 Open the chat from the ribbon (**message** icon) or the command palette: **Open Cursor Agent chat**.
 
