@@ -109,6 +109,7 @@ npx tsc -noEmit -skipLibCheck
 
 ## Current limitations
 - No plan mode
+- Slow startup time: takes a few seconds to start up to agent executable. Trying to mitagate it but no luck yet!
 - No multiple-choice dialogs when context needs refinement
 
 ## License
