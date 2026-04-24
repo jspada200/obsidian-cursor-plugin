@@ -18,9 +18,14 @@ export interface ChatMessage {
 	toolEntries?: ToolEntry[];
 }
 
+/** How the tab label was set; only `default` is replaced on the first user message. */
+export type TabTitleSource = "default" | "auto" | "user";
+
 export interface ChatTabState {
 	localId: string;
 	acpSessionId: string | null;
 	title: string;
+	/** `default` = "Chat n" until first send; then `auto` or user can set `user` via rename. */
+	tabTitleSource: TabTitleSource;
 	messages: ChatMessage[];
 }

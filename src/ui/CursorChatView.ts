@@ -1,6 +1,6 @@
 import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import { buildVaultContextBlock, searchNotesByNameOrTag } from "../context/buildContext";
-import type { CursorAgentPlugin } from "../plugin";
+import type { CursorAgentPlugin, PersistedChatTabs } from "../plugin";
 import type { AgentMode } from "../settings";
 import { CreatePlanModal, PermissionModal, AskQuestionModal } from "./modals";
 import type { PermissionChoice } from "./modals";
@@ -13,16 +13,18 @@ import {
 } from "../agentModels";
 import { parseSessionUpdateForDisplay } from "../session/sessionUpdateDisplay";
 import { CHAT_PERSISTENCE_VERSION } from "../chatPersistence";
-import type { ChatMessage, ChatTabState, ToolEntry } from "../chatTypes";
+import { resolveAcpSessionIdFromUpdate } from "../acp/resolveSessionId";
+import type { ChatMessage, ChatTabState, TabTitleSource, ToolEntry } from "../chatTypes";
 import {
 	copyToClipboard,
 	createMarkdownNoteAtRoot,
 	formatSessionAsMarkdown,
 } from "../util/chatNoteExport";
+import { titleFromFirstUserMessage } from "../util/tabTitle";
 
 export const VIEW_TYPE_CURSOR_AGENT = "cursor-agent-chat-view";
 
-export type { ChatMessage, ChatTabState, ToolEntry, ChatRole } from "../chatTypes";
+export type { ChatMessage, ChatTabState, ToolEntry, ChatRole, TabTitleSource } from "../chatTypes";
 
 export class CursorChatView extends ItemView {
 	tabs: ChatTabState[] = [];
@@ -46,6 +48,8 @@ export class CursorChatView extends ItemView {
 	/** Cleared on first non-skip session/update for this session after a prompt. */
 	private pendingFirstReplySessionId: string | null = null;
 	private persistDebounceHandle = 0;
+	/** When set, `renderTabs` shows an input for this tab (double-click to rename). */
+	private editingTabId: string | null = null;
 
 	constructor(leaf: WorkspaceLeaf, readonly plugin: CursorAgentPlugin) {
 		super(leaf);
@@ -68,9 +72,11 @@ export class CursorChatView extends ItemView {
 		this.mode = this.plugin.settings.defaultMode;
 		this.model = sanitizeModelId(this.plugin.settings.defaultModel);
 
+		/* Always rehydrate from the plugin’s snapshot (from disk) — do not require empty in-memory
+		 * `tabs` or a stale single-open session would never reload from data.json. */
 		const snap = this.plugin.persistedSnapshot;
-		if (snap?.tabs?.length && this.tabs.length === 0) {
-			this.tabs = snap.tabs.map((t) => cloneTabWithMessages(t));
+		if (snap?.tabs?.length) {
+			this.tabs = snap.tabs.map((t) => cloneTabWithMessages(t as ChatTabState));
 			this.activeTabId = snap.activeTabId ?? this.tabs[0]?.localId ?? null;
 		}
 
@@ -154,6 +160,20 @@ export class CursorChatView extends ItemView {
 		else this.renderTabs();
 		this.renderTranscript();
 		this.adjustComposerHeight();
+		this.applyStagedSessionIdForFirstTabFromPlugin();
+	}
+
+	/**
+	 * Binds the plugin-load ACP `sessionId` to `tabs[0]` (hidden bootstrap + session ready
+	 * before the user’s first message).
+	 */
+	applyStagedSessionIdForFirstTabFromPlugin(): void {
+		const t = this.tabs[0];
+		if (!t || t.acpSessionId) return;
+		const id = this.plugin.consumeStagedSessionForFirstTab();
+		if (!id) return;
+		t.acpSessionId = id;
+		void this.flushPersist();
 	}
 
 	/**
@@ -276,6 +296,7 @@ export class CursorChatView extends ItemView {
 			localId,
 			acpSessionId: null,
 			title: `Chat ${n}`,
+			tabTitleSource: "default",
 			messages: [],
 		});
 		this.activeTabId = localId;
@@ -290,6 +311,7 @@ export class CursorChatView extends ItemView {
 			new Notice("Keep at least one tab");
 			return;
 		}
+		if (this.editingTabId === localId) this.editingTabId = null;
 		this.tabs = this.tabs.filter((t) => t.localId !== localId);
 		if (this.activeTabId === localId) this.activeTabId = this.tabs[0]?.localId ?? null;
 		this.renderTabs();
@@ -301,23 +323,92 @@ export class CursorChatView extends ItemView {
 		return this.tabs.find((t) => t.localId === this.activeTabId) ?? null;
 	}
 
+	private startTabRename(localId: string): void {
+		this.editingTabId = localId;
+		this.activeTabId = localId;
+		this.renderTabs();
+		this.renderTranscript();
+	}
+
+	private commitTabRename(localId: string, value: string): void {
+		if (this.editingTabId !== localId) return;
+		this.editingTabId = null;
+		const t = this.tabs.find((x) => x.localId === localId);
+		if (t) {
+			const s = value.trim();
+			if (s.length > 0) t.title = s;
+			t.tabTitleSource = "user";
+		}
+		this.renderTabs();
+		void this.flushPersist();
+	}
+
+	private cancelTabRename(): void {
+		this.editingTabId = null;
+		this.renderTabs();
+	}
+
 	private renderTabs(): void {
 		if (!this.tabsRowEl) return;
 		this.tabsRowEl.empty();
 		for (const t of this.tabs) {
+			if (t.localId === this.editingTabId) {
+				const input = this.tabsRowEl.createEl("input", {
+					cls:
+						"cursor-agent-tab-pill cursor-agent-tab-input" +
+						(t.localId === this.activeTabId ? " is-active" : ""),
+					attr: {
+						type: "text",
+						"aria-label": "Chat title",
+					},
+					value: t.title,
+				});
+				input.addEventListener("click", (e) => e.stopPropagation());
+				input.addEventListener("blur", () => {
+					if (this.editingTabId === t.localId) {
+						this.commitTabRename(t.localId, input.value);
+					}
+				});
+				input.addEventListener("keydown", (e) => {
+					if (e.key === "Enter") {
+						e.preventDefault();
+						input.blur();
+					} else if (e.key === "Escape") {
+						e.preventDefault();
+						this.cancelTabRename();
+					}
+				});
+				continue;
+			}
 			const tab = this.tabsRowEl.createEl("button", {
 				cls: "cursor-agent-tab-pill" + (t.localId === this.activeTabId ? " is-active" : ""),
 				text: t.title,
+				attr: { type: "button" },
 			});
 			tab.addEventListener("click", (e) => {
 				if (e.shiftKey) {
 					this.closeTab(t.localId);
 					return;
 				}
+				/* Second click of a double-click: rename, do not re-fire as switch. */
+				if (e.detail === 2) {
+					e.preventDefault();
+					this.startTabRename(t.localId);
+					return;
+				}
 				this.activeTabId = t.localId;
 				this.renderTabs();
 				this.renderTranscript();
 				void this.flushPersist();
+			});
+		}
+		if (this.editingTabId) {
+			requestAnimationFrame(() => {
+				const inp = this.tabsRowEl?.querySelector<HTMLInputElement>("input.cursor-agent-tab-input");
+				if (inp) {
+					inp.focus();
+					inp.select();
+				}
 			});
 		}
 	}
@@ -357,8 +448,10 @@ export class CursorChatView extends ItemView {
 		}
 		try {
 			const body = formatSessionAsMarkdown(tab);
-			const path = await createMarkdownNoteAtRoot(this.app, tab.title, body);
-			new Notice(`Session saved: ${path}`);
+			const file = await createMarkdownNoteAtRoot(this.app, tab.title, body);
+			const leaf = this.app.workspace.getLeaf("tab");
+			await leaf.openFile(file);
+			new Notice(`Session saved: ${file.path}`);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			new Notice(`Could not save note: ${msg}`, 12000);
@@ -373,8 +466,8 @@ export class CursorChatView extends ItemView {
 			return;
 		}
 		try {
-			const path = await createMarkdownNoteAtRoot(this.app, tab.title, assistantMarkdown);
-			new Notice(`Saved: ${path}`);
+			const file = await createMarkdownNoteAtRoot(this.app, tab.title, assistantMarkdown);
+			new Notice(`Saved: ${file.path}`);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			new Notice(`Could not save note: ${msg}`, 12000);
@@ -585,17 +678,6 @@ export class CursorChatView extends ItemView {
 		modal.open();
 	}
 
-	private resolveSessionIdFromParams(params: unknown): string | undefined {
-		if (!params || typeof params !== "object") return undefined;
-		const o = params as Record<string, unknown>;
-		if (typeof o.sessionId === "string") return o.sessionId;
-		const u = o.update;
-		if (u && typeof u === "object" && typeof (u as Record<string, unknown>).sessionId === "string") {
-			return (u as Record<string, unknown>).sessionId as string;
-		}
-		return undefined;
-	}
-
 	private appendAssistantChunk(tab: ChatTabState, text: string): void {
 		const last = tab.messages[tab.messages.length - 1];
 		if (!last || last.role !== "assistant") {
@@ -684,10 +766,16 @@ export class CursorChatView extends ItemView {
 
 	/** @internal */
 	acpOnSessionUpdate(params: unknown): void {
-		const sid = this.resolveSessionIdFromParams(params);
-		const tab =
-			(sid ? this.tabs.find((t) => t.acpSessionId === sid) : null) ?? this.activeTab();
-		if (!tab) return;
+		const sid = resolveAcpSessionIdFromUpdate(params);
+		let tab: ChatTabState | null;
+		if (sid) {
+			tab = this.tabs.find((t) => t.acpSessionId === sid) ?? null;
+			/* No tab bound to this session yet (should be rare; bootstrap is suppressed in the plugin). */
+			if (!tab) return;
+		} else {
+			tab = this.activeTab() ?? null;
+			if (!tab) return;
+		}
 
 		const ev = parseSessionUpdateForDisplay(params);
 		if (this.pendingFirstReplySessionId) {
@@ -729,6 +817,13 @@ export class CursorChatView extends ItemView {
 		const userText = el.value.trim();
 		if (!userText) return;
 
+		/* One-time tab title from the first line of the first user message. */
+		if (tab.tabTitleSource === "default" && !tab.messages.some((m) => m.role === "user")) {
+			tab.title = titleFromFirstUserMessage(userText);
+			tab.tabTitleSource = "auto";
+			this.renderTabs();
+		}
+
 		const activeFile = this.app.workspace.getActiveFile();
 		const mentions = this.extractMentionPaths(userText);
 		const preamble = buildVaultContextBlock(this.app, activeFile, {
@@ -746,6 +841,7 @@ export class CursorChatView extends ItemView {
 		void this.flushPersist();
 
 		try {
+			await this.plugin.waitForPrewarmAndInitialBootstrap();
 			this.setRequestPhase("none");
 			this.plugin.agentLog.ui(
 				`sendMessage userTextChars=${userText.length} mentions=${mentions.size} preambleChars=${preamble.length}`
@@ -796,16 +892,25 @@ export class CursorChatView extends ItemView {
 	}
 
 	async flushPersist(): Promise<void> {
-		await this.plugin.persistTabs({
+		await this.plugin.persistTabs(this.buildPersistedChatTabs());
+	}
+
+	/**
+	 * Synchronous snapshot of open tabs (also used on plugin unload so the last in-memory
+	 * history is not lost if onClose has not run yet).
+	 */
+	buildPersistedChatTabs(): PersistedChatTabs {
+		return {
 			version: CHAT_PERSISTENCE_VERSION,
-			tabs: this.tabs.map(({ localId, acpSessionId, title, messages }) => ({
+			tabs: this.tabs.map(({ localId, acpSessionId, title, tabTitleSource, messages }) => ({
 				localId,
 				acpSessionId,
 				title,
+				tabTitleSource,
 				messages: messages.map((m) => cloneMessage(m)),
 			})),
 			activeTabId: this.activeTabId,
-		});
+		};
 	}
 }
 
@@ -820,10 +925,14 @@ function cloneMessage(m: ChatMessage): ChatMessage {
 }
 
 function cloneTabWithMessages(t: ChatTabState): ChatTabState {
+	const src = t.tabTitleSource;
+	const tabTitleSource: TabTitleSource =
+		src === "default" || src === "auto" || src === "user" ? src : "user";
 	return {
 		localId: t.localId,
 		acpSessionId: t.acpSessionId,
 		title: t.title,
+		tabTitleSource,
 		messages: t.messages.map((m) => cloneMessage(m)),
 	};
 }

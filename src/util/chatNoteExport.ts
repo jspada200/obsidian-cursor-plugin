@@ -1,4 +1,4 @@
-import type { App } from "obsidian";
+import type { App, TFile } from "obsidian";
 import type { ChatMessage, ChatTabState } from "../chatTypes";
 
 /** Windows/macOS / reserved — map to safe vault path segment. */
@@ -83,8 +83,11 @@ export async function copyToClipboard(text: string): Promise<void> {
 	ta.remove();
 }
 
-export async function createMarkdownNoteAtRoot(app: App, titleFromTab: string, body: string): Promise<string> {
+export async function createMarkdownNoteAtRoot(
+	app: App,
+	titleFromTab: string,
+	body: string
+): Promise<TFile> {
 	const path = nextAvailablePathAtRoot(app, titleFromTab, ".md");
-	await app.vault.create(path, body);
-	return path;
+	return app.vault.create(path, body);
 }

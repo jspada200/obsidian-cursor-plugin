@@ -1,6 +1,6 @@
-import type { ChatMessage, ChatRole, ToolEntry } from "./chatTypes";
+import type { ChatMessage, ChatRole, TabTitleSource, ToolEntry } from "./chatTypes";
 
-const CHAT_DATA_VERSION = 1;
+const CHAT_DATA_VERSION = 2;
 
 const ROLES: ReadonlySet<ChatRole> = new Set([
 	"user",
@@ -53,6 +53,7 @@ export function normalizePersistedChatData(raw: unknown): {
 		localId: string;
 		acpSessionId: string | null;
 		title: string;
+		tabTitleSource: TabTitleSource;
 		messages: ChatMessage[];
 	}>;
 	activeTabId: string | null;
@@ -66,10 +67,16 @@ export function normalizePersistedChatData(raw: unknown): {
 	if (!Array.isArray(tabsIn)) {
 		return { tabs: [], activeTabId: null, version: CHAT_DATA_VERSION };
 	}
+	function parseTabTitleSource(v: unknown): TabTitleSource {
+		if (v === "default" || v === "auto" || v === "user") return v;
+		return "user";
+	}
+
 	const tabs: Array<{
 		localId: string;
 		acpSessionId: string | null;
 		title: string;
+		tabTitleSource: TabTitleSource;
 		messages: ChatMessage[];
 	}> = [];
 	for (const row of tabsIn) {
@@ -88,7 +95,9 @@ export function normalizePersistedChatData(raw: unknown): {
 					? t.acpSessionId
 					: null;
 		const messages = sanitizeChatMessages(t.messages);
-		tabs.push({ localId, title, acpSessionId, messages });
+		/* v1 data had no field — do not auto-rename on first message for existing tabs. */
+		const tabTitleSource = parseTabTitleSource(t.tabTitleSource);
+		tabs.push({ localId, title, acpSessionId, tabTitleSource, messages });
 	}
 	const activeTabId =
 		typeof o.activeTabId === "string" && o.activeTabId.length > 0 ? o.activeTabId : null;
