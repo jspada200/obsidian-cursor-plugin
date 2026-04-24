@@ -1,5 +1,4 @@
 import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from "obsidian";
-import { AcpClient } from "../acp/client";
 import { buildVaultContextBlock, searchNotesByNameOrTag } from "../context/buildContext";
 import type { CursorAgentPlugin } from "../plugin";
 import type { AgentMode } from "../settings";
@@ -13,32 +12,19 @@ import {
 	sanitizeModelId,
 } from "../agentModels";
 import { parseSessionUpdateForDisplay } from "../session/sessionUpdateDisplay";
+import { CHAT_PERSISTENCE_VERSION } from "../chatPersistence";
+import type { ChatMessage, ChatTabState, ToolEntry } from "../chatTypes";
+import {
+	copyToClipboard,
+	createMarkdownNoteAtRoot,
+	formatSessionAsMarkdown,
+} from "../util/chatNoteExport";
 
 export const VIEW_TYPE_CURSOR_AGENT = "cursor-agent-chat-view";
 
-export type ChatRole = "user" | "assistant" | "system" | "thought" | "tool_group" | "status";
-
-export interface ToolEntry {
-	label: string;
-	text: string;
-}
-
-export interface ChatMessage {
-	role: ChatRole;
-	content: string;
-	/** Consecutive tool calls merged into one turn */
-	toolEntries?: ToolEntry[];
-}
-
-export interface ChatTabState {
-	localId: string;
-	acpSessionId: string | null;
-	title: string;
-	messages: ChatMessage[];
-}
+export type { ChatMessage, ChatTabState, ToolEntry, ChatRole } from "../chatTypes";
 
 export class CursorChatView extends ItemView {
-	acp: AcpClient | null = null;
 	tabs: ChatTabState[] = [];
 	activeTabId: string | null = null;
 	mode: AgentMode = "agent";
@@ -52,6 +38,14 @@ export class CursorChatView extends ItemView {
 	private modelSelectRef: HTMLSelectElement | null = null;
 	private modeSelectRef: HTMLSelectElement | null = null;
 	private transcriptRenderPending = false;
+	/** Filled when panel is open; top-of-chat load / working banner. */
+	private loadBannerEl: HTMLDivElement | null = null;
+	private loadBannerLabelEl: HTMLSpanElement | null = null;
+	/** Shown when ACP is ready but session/new or session/prompt is still in progress (matches log: rpc send session/new, then session/prompt, then first session/update). */
+	private requestPhase: "none" | "session_new" | "awaiting_first_reply" = "none";
+	/** Cleared on first non-skip session/update for this session after a prompt. */
+	private pendingFirstReplySessionId: string | null = null;
+	private persistDebounceHandle = 0;
 
 	constructor(leaf: WorkspaceLeaf, readonly plugin: CursorAgentPlugin) {
 		super(leaf);
@@ -70,17 +64,13 @@ export class CursorChatView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
+		this.plugin.setAcpChatView(this);
 		this.mode = this.plugin.settings.defaultMode;
 		this.model = sanitizeModelId(this.plugin.settings.defaultModel);
 
 		const snap = this.plugin.persistedSnapshot;
 		if (snap?.tabs?.length && this.tabs.length === 0) {
-			this.tabs = snap.tabs.map((t) => ({
-				localId: t.localId,
-				acpSessionId: t.acpSessionId,
-				title: t.title,
-				messages: [],
-			}));
+			this.tabs = snap.tabs.map((t) => cloneTabWithMessages(t));
 			this.activeTabId = snap.activeTabId ?? this.tabs[0]?.localId ?? null;
 		}
 
@@ -90,10 +80,20 @@ export class CursorChatView extends ItemView {
 
 		const topbar = root.createDiv({ cls: "cursor-agent-topbar" });
 		this.tabsRowEl = topbar.createDiv({ cls: "cursor-agent-tabs-row" });
-		topbar.createEl("button", { cls: "cursor-agent-topbar-btn", attr: { "aria-label": "New chat" } }, (b) => {
+		topbar.createEl("button", { cls: "cursor-agent-topbar-btn", attr: { "aria-label": "Save whole session as note", type: "button" } }, (b) => {
+			setIcon(b, "download");
+			b.addEventListener("click", () => void this.saveSessionAsNote());
+		});
+		topbar.createEl("button", { cls: "cursor-agent-topbar-btn", attr: { "aria-label": "New chat", type: "button" } }, (b) => {
 			setIcon(b, "plus");
 			b.addEventListener("click", () => this.addTab());
 		});
+
+		const loadLane = root.createDiv({ cls: "cursor-agent-load-lane" });
+		this.loadBannerEl = loadLane.createDiv({ cls: "cursor-agent-load-banner is-hidden" });
+		this.loadBannerLabelEl = this.loadBannerEl.createSpan({ cls: "cursor-agent-load-banner-label" });
+		/* Prewarm or reconnect may be in progress before first send — show steps from the same ACP phase signals as cursor-agent.log */
+		this.syncLoadBanner();
 
 		this.transcriptEl = root.createDiv({ cls: "cursor-agent-transcript" });
 
@@ -156,6 +156,77 @@ export class CursorChatView extends ItemView {
 		this.adjustComposerHeight();
 	}
 
+	/**
+	 * ACP connect phase + in-flight `session/new` and `session/prompt` (plugin calls this
+	 * after `onConnectProgress`). Always reads current state from the plugin and `requestPhase`.
+	 */
+	syncLoadBanner(): void {
+		const el = this.loadBannerEl;
+		const label = this.loadBannerLabelEl;
+		if (!el || !label) return;
+		const acp = this.plugin.getAcpConnectPhase();
+		/* 1) Handshake / process errors (cursor-agent.log: spawn, initialize, authenticate) */
+		if (acp !== "idle" && acp !== "ready") {
+			el.removeClass("is-hidden");
+			el.setAttribute("aria-hidden", "false");
+			if (acp === "spawning")
+				label.setText(
+					"Starting the Cursor Agent process… (log: [spawn])"
+				);
+			else if (acp === "initializing")
+				label.setText(
+					"Connecting: protocol initialize… (log: rpc/send method=initialize)"
+				);
+			else if (acp === "authenticating")
+				label.setText("Authenticating with Cursor… (log: authenticate, cursor_login)");
+			else if (acp === "error")
+				label.setText(
+					"Connection failed — check cursor-agent.log, then try again or change mode/model to reconnect."
+				);
+			else label.setText("Connecting to Cursor Agent…");
+			el.toggleClass("is-error", acp === "error");
+			el.toggleClass("is-pending", acp !== "error");
+			return;
+		}
+		/* 2) First message path after handshake: session/new, then time until first streamed update */
+		if (acp === "ready" && this.requestPhase === "session_new") {
+			el.removeClass("is-hidden");
+			el.setAttribute("aria-hidden", "false");
+			label.setText(
+				"Creating a chat session (session/new in the log). Usually quick…"
+			);
+			el.toggleClass("is-error", false);
+			el.toggleClass("is-pending", true);
+			return;
+		}
+		if (acp === "ready" && this.requestPhase === "awaiting_first_reply") {
+			el.removeClass("is-hidden");
+			el.setAttribute("aria-hidden", "false");
+			label.setText(
+				"Work in progress: your message is sent (session/prompt in the log). " +
+					"The first model reply often takes 20–60s while the agent and model start — this is normal. " +
+					"Streaming will appear here when the first update arrives (session/update)."
+			);
+			el.toggleClass("is-error", false);
+			el.toggleClass("is-pending", true);
+			return;
+		}
+		el.addClass("is-hidden");
+		el.setAttribute("aria-hidden", "true");
+		label.setText("");
+		el.toggleClass("is-error", false);
+		el.toggleClass("is-pending", false);
+	}
+
+	private setRequestPhase(phase: "none" | "session_new" | "awaiting_first_reply"): void {
+		this.requestPhase = phase;
+		if (phase === "none") {
+			this.pendingFirstReplySessionId = null;
+		}
+		this.plugin.agentLog.line("ui/request-banner", `phase=${phase}`);
+		this.syncLoadBanner();
+	}
+
 	private adjustComposerHeight(): void {
 		const el = this.composeEl;
 		if (!el) return;
@@ -170,10 +241,8 @@ export class CursorChatView extends ItemView {
 	}
 
 	private async resetAcpSessions(reason: string): Promise<void> {
-		if (this.acp) {
-			await this.acp.dispose();
-			this.acp = null;
-		}
+		this.setRequestPhase("none");
+		await this.plugin.disposeAcp();
 		for (const t of this.tabs) t.acpSessionId = null;
 		void this.flushPersist();
 		new Notice(reason);
@@ -248,6 +317,7 @@ export class CursorChatView extends ItemView {
 				this.activeTabId = t.localId;
 				this.renderTabs();
 				this.renderTranscript();
+				void this.flushPersist();
 			});
 		}
 	}
@@ -258,7 +328,16 @@ export class CursorChatView extends ItemView {
 		window.requestAnimationFrame(() => {
 			this.transcriptRenderPending = false;
 			void this.renderTranscriptImpl();
+			this.scheduleFlushPersist();
 		});
+	}
+
+	private scheduleFlushPersist(): void {
+		window.clearTimeout(this.persistDebounceHandle);
+		this.persistDebounceHandle = window.setTimeout(() => {
+			this.persistDebounceHandle = 0;
+			void this.flushPersist();
+		}, 900);
 	}
 
 	private renderTranscript(): void {
@@ -267,6 +346,39 @@ export class CursorChatView extends ItemView {
 
 	private markdownSourcePath(): string {
 		return this.app.workspace.getActiveFile()?.path ?? "";
+	}
+
+	private async saveSessionAsNote(): Promise<void> {
+		const tab = this.activeTab();
+		if (!tab) return;
+		if (tab.messages.length === 0) {
+			new Notice("Nothing to save in this chat.");
+			return;
+		}
+		try {
+			const body = formatSessionAsMarkdown(tab);
+			const path = await createMarkdownNoteAtRoot(this.app, tab.title, body);
+			new Notice(`Session saved: ${path}`);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			new Notice(`Could not save note: ${msg}`, 12000);
+		}
+	}
+
+	private async saveAssistantResponseAsNote(assistantMarkdown: string): Promise<void> {
+		const tab = this.activeTab();
+		if (!tab) return;
+		if (!assistantMarkdown.trim()) {
+			new Notice("Empty response — nothing to save.");
+			return;
+		}
+		try {
+			const path = await createMarkdownNoteAtRoot(this.app, tab.title, assistantMarkdown);
+			new Notice(`Saved: ${path}`);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			new Notice(`Could not save note: ${msg}`, 12000);
+		}
 	}
 
 	private async renderTranscriptImpl(): Promise<void> {
@@ -283,8 +395,32 @@ export class CursorChatView extends ItemView {
 			const bubble = turn.createDiv({ cls: "cursor-agent-bubble" });
 
 			if (m.role === "assistant") {
-				const md = bubble.createDiv({ cls: "cursor-agent-md markdown-rendered" });
-				await MarkdownRenderer.render(this.app, m.content, md, sourcePath, this);
+				const raw = m.content;
+				const shell = bubble.createDiv({ cls: "cursor-agent-assistant-shell" });
+				const toolbar = shell.createDiv({ cls: "cursor-agent-msg-toolbar" });
+				toolbar.createEl("button", { cls: "cursor-agent-msg-toolbtn", attr: { type: "button", "aria-label": "Copy this response" } }, (b) => {
+					setIcon(b, "copy");
+					b.addEventListener("click", (ev) => {
+						ev.stopPropagation();
+						void copyToClipboard(raw)
+							.then(() => new Notice("Copied to clipboard"))
+							.catch((err) =>
+								new Notice(
+									`Copy failed: ${err instanceof Error ? err.message : String(err)}`,
+									8000
+								)
+							);
+					});
+				});
+				toolbar.createEl("button", { cls: "cursor-agent-msg-toolbtn", attr: { type: "button", "aria-label": "Save this response as a new note" } }, (b) => {
+					setIcon(b, "file-plus");
+					b.addEventListener("click", (ev) => {
+						ev.stopPropagation();
+						void this.saveAssistantResponseAsNote(raw);
+					});
+				});
+				const md = shell.createDiv({ cls: "cursor-agent-md markdown-rendered" });
+				await MarkdownRenderer.render(this.app, raw, md, sourcePath, this);
 				continue;
 			}
 
@@ -297,12 +433,22 @@ export class CursorChatView extends ItemView {
 			}
 
 			if (m.role === "tool_group" && m.toolEntries && m.toolEntries.length > 0) {
-				bubble.createEl("div", { cls: "cursor-agent-tool-group-title", text: "Tools" });
-				const list = bubble.createDiv({ cls: "cursor-agent-tool-group-list" });
-				for (const e of m.toolEntries) {
+				const entries = m.toolEntries;
+				const n = entries.length;
+				const last = entries[entries.length - 1];
+				const summaryText =
+					n === 1
+						? `Tools — ${last.label}`
+						: `Tools (${n}) — ${last.label}`;
+				const det = bubble.createEl("details", { cls: "cursor-agent-tool-details" });
+				det.createEl("summary", { cls: "cursor-agent-tool-summary", text: summaryText });
+				const list = det.createDiv({ cls: "cursor-agent-tool-group-list" });
+				for (const e of entries) {
 					const row = list.createDiv({ cls: "cursor-agent-tool-row" });
 					row.createEl("div", { cls: "cursor-agent-tool-row-label", text: e.label });
-					row.createEl("div", { cls: "cursor-agent-tool-row-body", text: e.text });
+					if (e.text?.trim()) {
+						row.createEl("div", { cls: "cursor-agent-tool-row-body", text: e.text });
+					}
 				}
 				continue;
 			}
@@ -368,20 +514,8 @@ export class CursorChatView extends ItemView {
 		return set;
 	}
 
-	private createAcpClient(): AcpClient {
-		return new AcpClient(
-			{
-				onSessionUpdate: (params) => this.handleSessionUpdate(params),
-				onPermissionRequest: (params, respond) => this.handlePermission(params, respond),
-				onCursorCreatePlan: (params, respond) => this.handleCreatePlan(params, respond),
-				onCursorAskQuestion: (params, respond) => this.handleAskQuestion(params, respond),
-				onStderrLine: (line) => console.warn("[cursor-agent stderr]", line),
-			},
-			this.plugin.agentLog
-		);
-	}
-
-	private handlePermission(params: unknown, respond: (r: unknown) => void): void {
+	/** @internal — ACP JSON-RPC; forwards from CursorAgentPlugin. */
+	acpOnPermissionRequest(params: unknown, respond: (r: unknown) => void): void {
 		let summary = "";
 		try {
 			summary = typeof params === "string" ? params : JSON.stringify(params, null, 2);
@@ -409,7 +543,8 @@ export class CursorChatView extends ItemView {
 		modal.open();
 	}
 
-	private handleCreatePlan(params: unknown, respond: (r: unknown) => void): void {
+	/** @internal */
+	acpOnCreatePlan(params: unknown, respond: (r: unknown) => void): void {
 		const p = params as {
 			overview?: string;
 			plan?: string;
@@ -427,7 +562,8 @@ export class CursorChatView extends ItemView {
 		modal.open();
 	}
 
-	private handleAskQuestion(params: unknown, respond: (r: unknown) => void): void {
+	/** @internal */
+	acpOnAskQuestion(params: unknown, respond: (r: unknown) => void): void {
 		const p = params as {
 			title?: string;
 			questions?: Array<{
@@ -478,23 +614,90 @@ export class CursorChatView extends ItemView {
 		}
 	}
 
-	private appendToolEntry(tab: ChatTabState, label: string, text: string): void {
-		const entry: ToolEntry = { label, text };
-		const last = tab.messages[tab.messages.length - 1];
-		if (last?.role === "tool_group" && last.toolEntries) {
-			last.toolEntries.push(entry);
+	private applyToolEvent(
+		tab: ChatTabState,
+		args: {
+			kind: string;
+			toolName: string;
+			detail: string;
+			toolCallId?: string;
+		}
+	): void {
+		const lastMsg = tab.messages[tab.messages.length - 1];
+		const inGroup = lastMsg?.role === "tool_group" && lastMsg.toolEntries?.length;
+
+		const isUpdate = args.kind === "tool_call_update" || args.kind.includes("update");
+
+		/** Append detail lines into an existing tool row */
+		const appendDetail = (e: ToolEntry, extra: string) => {
+			const t = extra.trim();
+			if (!t) return;
+			e.text = e.text ? `${e.text}\n${t}`.trim() : t;
+		};
+
+		if (isUpdate) {
+			if (inGroup) {
+				const te = lastMsg.toolEntries!;
+				let target: ToolEntry | undefined;
+				if (args.toolCallId) {
+					for (let i = te.length - 1; i >= 0; i--) {
+						if (te[i].toolCallId === args.toolCallId) {
+							target = te[i];
+							break;
+						}
+					}
+				}
+				if (!target) target = te[te.length - 1];
+				if (args.toolName && args.toolName !== "…") target.label = args.toolName;
+				if (args.toolCallId) target.toolCallId = target.toolCallId ?? args.toolCallId;
+				appendDetail(target, args.detail);
+				return;
+			}
+			/* Orphaned update: still show the payload */
+			tab.messages.push({
+				role: "tool_group",
+				content: "",
+				toolEntries: [
+					{
+						label: args.toolName && args.toolName !== "…" ? args.toolName : "tool (update)",
+						text: args.detail,
+						toolCallId: args.toolCallId,
+					},
+				],
+			});
+			return;
+		}
+
+		const entry: ToolEntry = {
+			label: args.toolName,
+			text: args.detail,
+			toolCallId: args.toolCallId,
+		};
+
+		if (lastMsg?.role === "tool_group" && lastMsg.toolEntries) {
+			/* New `tool_call` after prior tools in the same run — keep one group */
+			lastMsg.toolEntries.push(entry);
 		} else {
 			tab.messages.push({ role: "tool_group", content: "", toolEntries: [entry] });
 		}
 	}
 
-	private handleSessionUpdate(params: unknown): void {
+	/** @internal */
+	acpOnSessionUpdate(params: unknown): void {
 		const sid = this.resolveSessionIdFromParams(params);
 		const tab =
 			(sid ? this.tabs.find((t) => t.acpSessionId === sid) : null) ?? this.activeTab();
 		if (!tab) return;
 
 		const ev = parseSessionUpdateForDisplay(params);
+		if (this.pendingFirstReplySessionId) {
+			const match =
+				(sid && sid === this.pendingFirstReplySessionId) ||
+				(!sid && this.activeTab()?.acpSessionId === this.pendingFirstReplySessionId);
+			if (match && ev.type !== "skip") {
+				this.setRequestPhase("none");
+			}
+		}
 		switch (ev.type) {
 			case "skip":
 				return;
@@ -505,50 +708,18 @@ export class CursorChatView extends ItemView {
 				this.appendThoughtChunk(tab, ev.text);
 				break;
 			case "tool":
-				this.appendToolEntry(tab, ev.label, ev.text);
+				this.applyToolEvent(tab, {
+					kind: ev.sessionUpdateKind,
+					toolName: ev.toolName,
+					detail: ev.detail,
+					toolCallId: ev.toolCallId,
+				});
 				break;
 			case "status":
 				tab.messages.push({ role: "status", content: ev.text });
 				break;
 		}
 		this.queueRenderTranscript();
-	}
-
-	async ensureAcp(): Promise<void> {
-		const vaultRoot = getVaultOsPath(this.app);
-		if (!vaultRoot) {
-			new Notice("Vault path unavailable — desktop vault required.");
-			throw new Error("No vault OS path");
-		}
-		if (this.acp?.isRunning()) return;
-
-		this.plugin.agentLog.ui(
-			`ensureAcp spawn mode=${this.mode} model=${this.model || "(default)"} vault=${vaultRoot}`
-		);
-
-		const agentPath = expandAgentPath(this.plugin.settings.agentBinaryPath);
-
-		const extra = this.plugin.settings.extraAgentArgs
-			.split(/\s+/)
-			.map((s) => s.trim())
-			.filter(Boolean);
-
-		if (!this.acp) this.acp = this.createAcpClient();
-		await this.acp.spawn({
-			agentPath,
-			workspaceRoot: vaultRoot,
-			mode: this.mode,
-			model: this.model,
-			trustWorkspace: this.plugin.settings.trustWorkspace,
-			extraArgs: extra,
-		});
-
-		/* New `agent acp` process has no memory of prior sessions — drop stale IDs from UI & disk. */
-		for (const t of this.tabs) {
-			t.acpSessionId = null;
-		}
-		void this.flushPersist();
-		this.plugin.agentLog.ui("ensureAcp: cleared tab session IDs after spawn (new agent process)");
 	}
 
 	async sendMessage(): Promise<void> {
@@ -572,48 +743,87 @@ export class CursorChatView extends ItemView {
 		el.value = "";
 		this.adjustComposerHeight();
 		this.renderTranscript();
+		void this.flushPersist();
 
 		try {
+			this.setRequestPhase("none");
 			this.plugin.agentLog.ui(
 				`sendMessage userTextChars=${userText.length} mentions=${mentions.size} preambleChars=${preamble.length}`
 			);
-			await this.ensureAcp();
-			if (!this.acp) throw new Error("ACP not initialized");
+			await this.plugin.ensureAcp(this, this.mode, this.model);
+			const acp = this.plugin.acp;
+			if (!acp) throw new Error("ACP not initialized");
 
 			if (!tab.acpSessionId) {
+				this.setRequestPhase("session_new");
 				const vaultRoot = getVaultOsPath(this.app);
-				const { sessionId } = await this.acp.sessionNew(vaultRoot);
+				if (!vaultRoot) throw new Error("No vault OS path");
+				const { sessionId } = await acp.sessionNew(vaultRoot);
 				tab.acpSessionId = sessionId;
 				this.plugin.agentLog.ui(`session/new ok sessionId=${sessionId}`);
 			}
 
+			/* Stays up until the first non-skip session/update (30s+ cold start is common). */
+			this.setRequestPhase("awaiting_first_reply");
+			this.pendingFirstReplySessionId = tab.acpSessionId!;
+
 			const full = [{ type: "text" as const, text: preamble + userText }];
-			await this.acp.sessionPrompt(tab.acpSessionId, full);
+			await acp.sessionPrompt(tab.acpSessionId, full);
 			this.plugin.agentLog.ui("session/prompt RPC finished (await returned)");
+			/* If no stream events arrived, clear the banner. */
+			if (this.requestPhase === "awaiting_first_reply") {
+				this.setRequestPhase("none");
+			}
 			await this.flushPersist();
 		} catch (e) {
+			this.setRequestPhase("none");
 			const msg = e instanceof Error ? e.message : String(e);
 			this.plugin.agentLog.line("ui/error", msg);
 			console.error("[Cursor Agent]", e);
 			new Notice("Cursor Agent error: " + msg, 20000);
 			tab.messages.push({ role: "system", content: "Error: " + msg });
 			this.renderTranscript();
+			void this.flushPersist();
 		}
 	}
 
 	async onClose(): Promise<void> {
+		window.clearTimeout(this.persistDebounceHandle);
+		this.persistDebounceHandle = 0;
+		this.setRequestPhase("none");
+		this.plugin.setAcpChatView(null);
 		await this.flushPersist();
 	}
 
 	async flushPersist(): Promise<void> {
 		await this.plugin.persistTabs({
-			tabs: this.tabs.map(({ localId, acpSessionId, title }) => ({ localId, acpSessionId, title })),
+			version: CHAT_PERSISTENCE_VERSION,
+			tabs: this.tabs.map(({ localId, acpSessionId, title, messages }) => ({
+				localId,
+				acpSessionId,
+				title,
+				messages: messages.map((m) => cloneMessage(m)),
+			})),
 			activeTabId: this.activeTabId,
 		});
 	}
+}
 
-	async onunload(): Promise<void> {
-		if (this.acp) await this.acp.dispose();
-		this.acp = null;
-	}
+function cloneMessage(m: ChatMessage): ChatMessage {
+	return {
+		role: m.role,
+		content: m.content,
+		...(m.toolEntries?.length
+			? { toolEntries: m.toolEntries.map((e) => ({ ...e })) }
+			: {}),
+	};
+}
+
+function cloneTabWithMessages(t: ChatTabState): ChatTabState {
+	return {
+		localId: t.localId,
+		acpSessionId: t.acpSessionId,
+		title: t.title,
+		messages: t.messages.map((m) => cloneMessage(m)),
+	};
 }

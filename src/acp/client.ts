@@ -7,7 +7,17 @@ import type { JsonRpcRequest, JsonRpcResponse, SessionPromptPart } from "./types
 
 export type SessionUpdateHandler = (msg: unknown) => void;
 
+/** Drives the chat load banner; mirrors cursor-agent.log stages: spawn → initialize → authenticate. */
+export type AcpConnectProgressPhase =
+	| "spawning"
+	| "initializing"
+	| "authenticating"
+	| "ready"
+	| "error";
+
 export interface AcpClientHooks {
+	/** Fired as the subprocess and ACP JSON-RPC handshake progress (see AgentFileLogger). */
+	onConnectProgress?: (phase: AcpConnectProgressPhase) => void;
 	onSessionUpdate: SessionUpdateHandler;
 	onPermissionRequest: (
 		params: unknown,
@@ -92,6 +102,8 @@ export class AcpClient {
 		const mergedEnv = augmentPathEnv();
 		this.log?.spawn(opt.agentPath, args, (mergedEnv.PATH ?? "").slice(0, 400));
 
+		this.hooks.onConnectProgress?.("spawning");
+
 		this.proc = spawn(opt.agentPath, args, {
 			env: mergedEnv,
 			stdio: ["pipe", "pipe", "pipe"],
@@ -129,16 +141,26 @@ export class AcpClient {
 			this.pending.clear();
 		});
 
-		await this.request("initialize", {
-			protocolVersion: 1,
-			clientCapabilities: {
-				fs: { readTextFile: false, writeTextFile: false },
-				terminal: false,
-			},
-			clientInfo: { name: "obsidian-cursor-plugin", version: "1.0.0" },
-		});
+		/* [rpc/send] id=* method=initialize — ACP handshakes the protocol */
+		this.hooks.onConnectProgress?.("initializing");
+		try {
+			await this.request("initialize", {
+				protocolVersion: 1,
+				clientCapabilities: {
+					fs: { readTextFile: false, writeTextFile: false },
+					terminal: false,
+				},
+				clientInfo: { name: "obsidian-cursor-plugin", version: "1.0.0" },
+			});
 
-		await this.request("authenticate", { methodId: "cursor_login" });
+			/* [rpc/send] method=authenticate methodId=cursor_login */
+			this.hooks.onConnectProgress?.("authenticating");
+			await this.request("authenticate", { methodId: "cursor_login" });
+			this.hooks.onConnectProgress?.("ready");
+		} catch (e) {
+			this.hooks.onConnectProgress?.("error");
+			throw e;
+		}
 	}
 
 	private enqueue<T>(fn: () => Promise<T>): Promise<T> {

@@ -17,8 +17,13 @@
     "tabs": [
       {
         "localId": "1aaeaa55-f3af-4fb5-8c30-f92ab0be3b77",
-        "acpSessionId": "877214eb-9af6-408a-9b5a-f73bc739f9ba",
+        "acpSessionId": "3fac1e2c-b97b-4655-a2e1-f745e1b7ad24",
         "title": "Chat 1"
+      },
+      {
+        "localId": "f5f2d282-e4b3-4d6e-a6d8-bde268ac8a0c",
+        "acpSessionId": null,
+        "title": "Chat 2"
       }
     ],
     "activeTabId": "1aaeaa55-f3af-4fb5-8c30-f92ab0be3b77"
