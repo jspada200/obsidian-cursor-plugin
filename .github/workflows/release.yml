@@ -53,6 +53,12 @@ jobs:
         with:
           name: "${{ github.ref_name }}"
           generate_release_notes: true
-          files: obsidian-cursor-plugin.zip
+          # Zip for manual / some tools; also attach loose files — BRAT and others
+          # resolve manifest.json from the release as direct assets, not from inside the zip.
+          files: |
+            obsidian-cursor-plugin.zip
+            main.js
+            manifest.json
+            styles.css
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
