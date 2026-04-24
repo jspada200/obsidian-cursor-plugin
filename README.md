@@ -34,6 +34,20 @@ Log path: `<Vault>/.obsidian/plugins/obsidian-cursor-plugin/cursor-agent.log` (s
 
 Exact CLI availability and pricing are defined by Cursor; if `agent` cannot log in or run models, check your Cursor account and CLI status first.
 
+## Install the plugin (BRAT, pre–marketplace)
+
+**This plugin is not in the official Obsidian community plugin catalog yet.** If you want to try it before it is published to the marketplace, use **[BRAT](https://github.com/TfTHacker/obsidian42-brat)** (Beta Reviewer’s Auto-update Tool) to install and update it from this repository.
+
+1. In Obsidian: **Settings → Community plugins** — turn off **Restricted mode** if needed, then **Browse** and install **BRAT** (published as *Obsidian42 - BRAT* or similar). Enable the plugin.
+2. Open **Settings → Obsidian42 - BRAT** (or **BRAT**).
+3. Use **Add Beta plugin** (wording may vary slightly by version) and enter this GitHub URL:
+
+   `https://github.com/jspada200/obsidian-cursor-plugin`
+
+4. After BRAT finishes, enable **Cursor Agent** under **Settings → Community plugins** (and complete [User setup](#user-setup) below: CLI, `agent login`, and plugin options).
+
+BRAT will track GitHub **Releases** for updates when new versions are published.
+
 ## User setup
 
 1. Install the Cursor CLI using Cursor’s installation instructions (`curl … | bash` or their current installer).
