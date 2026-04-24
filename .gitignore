@@ -2,6 +2,8 @@ node_modules/
 main.js
 main.js.map
 .DS_Store
-./cursor-agent.log
+# Paths relative to this file; do not use ./ (Git does not match repo-root files that way)
+/cursor-agent.log
+/cursor-agent.json
 # Local plugin data (settings, persisted chats) — not source
-./data.json*
+/data.json*
