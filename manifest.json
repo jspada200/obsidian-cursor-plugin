@@ -1,0 +1,10 @@
+{
+	"id": "obsidian-cursor-plugin",
+	"name": "Cursor Agent",
+	"version": "1.0.0",
+	"minAppVersion": "1.5.0",
+	"description": "Chat with Cursor Agent (ACP) using your vault as the workspace — Ask, Plan, and Agent modes.",
+	"author": "",
+	"isDesktopOnly": true,
+	"styles": "styles.css"
+}

@@ -1,0 +1,26 @@
+{
+  "settings": {
+    "agentBinaryPath": "",
+    "extraAgentArgs": "",
+    "defaultMode": "agent",
+    "defaultModel": "",
+    "trustWorkspace": true,
+    "autoApprovePermissions": "never",
+    "includeOpenTabs": true,
+    "includeLinkedNotes": true,
+    "maxContextLinks": 24,
+    "maxContextTabs": 16,
+    "agentFileLog": true,
+    "agentLogVerbose": true
+  },
+  "chat": {
+    "tabs": [
+      {
+        "localId": "1aaeaa55-f3af-4fb5-8c30-f92ab0be3b77",
+        "acpSessionId": "877214eb-9af6-408a-9b5a-f73bc739f9ba",
+        "title": "Chat 1"
+      }
+    ],
+    "activeTabId": "1aaeaa55-f3af-4fb5-8c30-f92ab0be3b77"
+  }
+}
