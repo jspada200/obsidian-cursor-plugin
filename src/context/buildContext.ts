@@ -7,6 +7,8 @@ export interface ContextOptions {
 	maxTabs: number;
 	maxLinks: number;
 	explicitPaths: Set<string>;
+	/** Absolute paths to SKILL.md outside the vault (listed for the agent; content is in the user message). */
+	externalSkillPaths?: string[];
 }
 
 function listOpenMarkdownPaths(app: App, max: number): string[] {
@@ -71,6 +73,12 @@ export function buildVaultContextBlock(app: App, activeFile: TFile | null, opts:
 	if (opts.explicitPaths.size > 0) {
 		sections.push("### @mentioned notes");
 		for (const p of opts.explicitPaths) sections.push(`- ${p}`);
+	}
+
+	const ext = opts.externalSkillPaths?.filter(Boolean) ?? [];
+	if (ext.length > 0) {
+		sections.push("### Skill files (outside vault workspace)");
+		for (const p of ext) sections.push(`- ${p}`);
 	}
 
 	sections.push("---");

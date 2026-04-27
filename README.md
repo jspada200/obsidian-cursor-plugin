@@ -16,10 +16,43 @@ It connects Obsidian to Cursor’s Agent through **ACP** (stdio JSON-RPC): **Ask
 - **Vault as workspace** — Every session uses your Obsidian vault folder as `--workspace`, so paths and edits line up with your notes.
 - **Session tabs** — Multiple chats; tab metadata can persist across restarts (message history is kept in memory for the current session).
 - **Context** — Each send can include open tabs, outbound links from the active note, and paths you `@`-mention (search by path/name or `#tag`).
+- **Slash skills & commands** — Type `/` in the chat box for a Cursor-style menu (**Skills** from `<Vault>/.cursor/skills` and `~/.cursor/skills`, plus optional extra scan dirs in settings; **Commands** from a curated list). Arrow keys and Enter select; Esc closes. Skills outside the vault are inlined into the prompt so the agent can follow them.
+- **Slash in a markdown note** — In any **`.md`** note (Source or Live Preview), type `/` at the start of a line or after whitespace; the same skills/commands list appears. Picking one inserts a normal markdown link like `[▶ /create-skill](obsidian://cursoragent?…)` so it stays **clickable** in Live Preview and Reading (raw `<cursor-agent>` HTML often shows as a code block).
+- **Run from a note** — Click that link (or the legacy **Run** control if you still use `<cursor-agent>…</cursor-agent>`). Obsidian opens the `cursoragent` URI, the plugin opens a new chat tab, and sends the skill/command with the note as context.
 - **Modes & model** — Dropdowns for mode (agent / plan / ask) and model. Models are loaded by running **`agent models`** (fallback: **`agent --list-models`**); each option stores only the **model id** (the part before ` - `), which is what gets passed as **`--model`** to the CLI.
 - **Agent log file** — Optional append-only **`cursor-agent.log`** next to the plugin (spawn command, ACP RPC summaries, stderr, session/update stream events). Toggle under **Settings → Cursor Agent → Diagnostics log**. Command palette: **Reveal Cursor Agent log file**.
 
 Log path: `<Vault>/.obsidian/plugins/obsidian-cursor-plugin/cursor-agent.log` (same folder as `main.js`). Large logs rotate automatically.
+
+## Skills
+
+Skills are the same **Agent Skill** pattern Cursor uses: each skill is a **`SKILL.md`** file (often with YAML frontmatter such as `name` and `description`). The plugin discovers them, shows them next to **Commands** in the `/` picker, and can run them from the chat or from a note with the note as context.
+
+<p align="center">
+  <img src="assets/skillExample.gif" alt="Skills: slash menu in chat and in notes, then run from a link" width="700"/>
+</p>
+
+### Where skills are loaded from
+
+1. **Inside your vault** — Any `SKILL.md` under **`<Vault>/.cursor/skills/`** (nested folders are fine, same layout as Cursor).
+2. **Your user Cursor folder** — **`~/.cursor/skills`** on the machine where Obsidian runs (desktop only).
+3. **Extra roots (optional)** — **Settings → Cursor Agent → Extra skill scan directories**: one absolute path per line; each tree is scanned for `SKILL.md` the same way.
+
+Saving plugin settings refreshes the cached catalog so new or moved skills show up after a moment.
+
+### In the Cursor Agent panel
+
+Type **`/`** in the message box (after whitespace or at the start of the line). You get **Skills** and **Commands** sections, filtering as you type. **Enter** selects a row; **Esc** closes the menu. Choosing a **skill** sends instructions (and for vault skills, an `@` path; for skills outside the vault, the skill body is inlined so the agent can still follow them).
+
+### In markdown notes
+
+In a **`.md`** file, type **`/`** the same way (start of line or after whitespace). The editor suggest list matches the chat menu. Picking an item inserts a markdown link **`[▶ /…](obsidian://cursoragent?…)`** that stays clickable in **Live Preview** and **Reading**; clicking it opens a **new chat tab** and runs that skill or command with **the note you were in** as context.
+
+You can still use legacy inline HTML **`<cursor-agent>…</cursor-agent>`** if you prefer; when Obsidian renders it as an element, the plugin shows a **Run** button there too.
+
+### Commands
+
+**Commands** in the `/` menu are a **curated** list of common slash-style invocations (the desktop Cursor app is not queried live). They are sent as plain `/…` text to the agent like any other message.
 
 
 ## Like what I am doing?

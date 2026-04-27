@@ -5,6 +5,19 @@ import { DEFAULT_SETTINGS } from "../settings";
 import { getAgentLogPath, revealAgentLogFile } from "../logging/agentFileLog";
 import { agentBinaryExists, expandAgentPath, sanitizeModelId } from "../agentModels";
 
+const PLUGIN_REPO = "https://github.com/jspada200/obsidian-cursor-plugin";
+const PLUGIN_ISSUES = `${PLUGIN_REPO}/issues`;
+const BMC_URL = "https://www.buymeacoffee.com/spadjv";
+const BMC_IMG = "https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png";
+
+function addExternalLink(parent: HTMLElement, label: string, href: string): HTMLAnchorElement {
+	const a = parent.createEl("a", { text: label, href });
+	a.classList.add("cursor-agent-settings-header-link");
+	a.setAttr("target", "_blank");
+	a.setAttr("rel", "noopener noreferrer");
+	return a;
+}
+
 export class CursorAgentSettingTab extends PluginSettingTab {
 	constructor(app: App, readonly plugin: CursorAgentPlugin) {
 		super(app, plugin);
@@ -13,11 +26,33 @@ export class CursorAgentSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl("h2", { text: "Cursor Agent" });
 
-		containerEl.createEl("p", {
-			text: "Uses the Cursor CLI (`agent acp`). Install the CLI and run `agent login` in a terminal once. Workspace is always your vault folder.",
-			cls: "setting-item-description",
+		const { manifest } = this.plugin;
+		const header = containerEl.createDiv({ cls: "cursor-agent-settings-header" });
+
+		const titleRow = header.createDiv({ cls: "cursor-agent-settings-header-title-row" });
+		titleRow.createEl("h2", { cls: "cursor-agent-settings-header-title", text: manifest.name });
+		titleRow.createEl("span", { cls: "cursor-agent-settings-header-version", text: `v${manifest.version}` });
+
+		header.createEl("p", {
+			cls: "cursor-agent-settings-header-desc",
+			text: `${manifest.description} It uses the Cursor CLI (\`agent\` / ACP) with your vault as the workspace. Install the CLI, run \`agent login\` once, then chat from the Cursor Agent view.`,
+		});
+
+		const links = header.createDiv({ cls: "cursor-agent-settings-header-links" });
+		addExternalLink(links, "GitHub repository", PLUGIN_REPO);
+		addExternalLink(links, "Report an issue", PLUGIN_ISSUES);
+
+		const bmc = header.createDiv({ cls: "cursor-agent-settings-header-bmc" });
+		const bmcLink = bmc.createEl("a", { href: BMC_URL });
+		bmcLink.setAttr("target", "_blank");
+		bmcLink.setAttr("rel", "noopener noreferrer");
+		bmcLink.createEl("img", {
+			cls: "cursor-agent-settings-header-bmc-img",
+			attr: {
+				src: BMC_IMG,
+				alt: "Buy Me A Coffee",
+			},
 		});
 
 		new Setting(containerEl)
@@ -142,6 +177,20 @@ export class CursorAgentSettingTab extends PluginSettingTab {
 				t.inputEl.type = "number";
 				t.setValue(String(this.plugin.settings.maxContextLinks)).onChange(async (v) => {
 					this.plugin.settings.maxContextLinks = Number(v) || DEFAULT_SETTINGS.maxContextLinks;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Extra skill scan directories")
+			.setDesc(
+				"One absolute path per line. Each tree is scanned for SKILL.md (in addition to the vault’s .cursor/skills and ~/.cursor/skills)."
+			)
+			.addTextArea((t) => {
+				t.inputEl.rows = 4;
+				t.setPlaceholder("/path/to/more/skills-root");
+				t.setValue(this.plugin.settings.extraSkillScanDirs).onChange(async (v) => {
+					this.plugin.settings.extraSkillScanDirs = v;
 					await this.plugin.saveSettings();
 				});
 			});

@@ -1,4 +1,5 @@
-import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
+import type { CatalogEntry } from "./skills/catalog";
 import { AcpClient, type AcpConnectProgressPhase } from "./acp/client";
 import { expandAgentPath, sanitizeModelId } from "./agentModels";
 import { AgentFileLogger, revealAgentLogFile } from "./logging/agentFileLog";
@@ -10,6 +11,15 @@ import type { ChatMessage, TabTitleSource } from "./chatTypes";
 import { CHAT_PERSISTENCE_VERSION, normalizePersistedChatData } from "./chatPersistence";
 import { buildPluginBootstrapContextText } from "./obsidianContextPreamble";
 import { resolveAcpSessionIdFromUpdate } from "./acp/resolveSessionId";
+import {
+	buildInvocationPayload,
+	buildSkillCatalog,
+	catalogCommandsOnly,
+	findEntryBySlashId,
+	findSkillByPath,
+} from "./skills/catalog";
+import { registerCursorAgentInvokeMarkdown } from "./markdown/cursorAgentInvokePostProcessor";
+import { SkillSlashEditorSuggest } from "./ui/SkillSlashEditorSuggest";
 
 export interface PersistedChatTabs {
 	/** Bumped when the on-disk `chat` shape changes. */
@@ -58,6 +68,10 @@ export class CursorAgentPlugin extends Plugin {
 	private stagedSessionForFirstTab: string | null = null;
 	/** While set, `session/update` for this id is not rendered (invisible bootstrap reply). */
 	private suppressUiForSessionId: string | null = null;
+	/** Cached skill/command list for chat `/` menu and note-editor suggest. */
+	private skillCatalogCache: { skills: CatalogEntry[]; commands: CatalogEntry[] } | null = null;
+	private skillCatalogPromise: Promise<{ skills: CatalogEntry[]; commands: CatalogEntry[] }> | null =
+		null;
 
 	/** @internal — chat view calls on open/close. */
 	setAcpChatView(view: CursorChatView | null): void {
@@ -69,6 +83,31 @@ export class CursorAgentPlugin extends Plugin {
 
 	getAcpConnectPhase(): AcpConnectProgressPhase | "idle" {
 		return this.acpConnectPhase;
+	}
+
+	/**
+	 * Skills + commands catalog (vault, ~/.cursor/skills, extras, curated commands).
+	 * Cached until {@link invalidateSkillCatalog} runs (e.g. after settings save).
+	 */
+	async getSkillCatalog(): Promise<{ skills: CatalogEntry[]; commands: CatalogEntry[] }> {
+		if (this.skillCatalogCache) return this.skillCatalogCache;
+		if (!this.skillCatalogPromise) {
+			this.skillCatalogPromise = (async () => {
+				try {
+					return await buildSkillCatalog(this.app, this.settings);
+				} catch (e) {
+					console.error("[Cursor Agent] skill catalog", e);
+					return catalogCommandsOnly();
+				}
+			})();
+		}
+		this.skillCatalogCache = await this.skillCatalogPromise;
+		return this.skillCatalogCache;
+	}
+
+	invalidateSkillCatalog(): void {
+		this.skillCatalogCache = null;
+		this.skillCatalogPromise = null;
 	}
 
 	private setAcpConnectPhase(phase: AcpConnectProgressPhase | "idle"): void {
@@ -299,7 +338,84 @@ export class CursorAgentPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new CursorAgentSettingTab(this.app, this));
+		registerCursorAgentInvokeMarkdown(this);
+		this.registerEditorSuggest(new SkillSlashEditorSuggest(this.app, this));
+		this.registerObsidianProtocolHandler("cursoragent", (params) => {
+			const fileRaw = params.file;
+			if (!fileRaw || typeof fileRaw !== "string") return;
+			const vaultRaw = params.vault;
+			if (vaultRaw && typeof vaultRaw === "string") {
+				const want = this.safeDecodeUriParam(vaultRaw);
+				if (want !== this.app.vault.getName()) {
+					new Notice("This skill link belongs to a different vault.");
+					return;
+				}
+			}
+			const sourcePath = this.safeDecodeUriParam(fileRaw);
+			const slashRaw = params.slash;
+			const skillRaw = params.skill;
+			const slashId =
+				slashRaw && typeof slashRaw === "string" ? this.safeDecodeUriParam(slashRaw) : "";
+			const skillPath =
+				skillRaw && typeof skillRaw === "string" ? this.safeDecodeUriParam(skillRaw) : "";
+			void this.invokeAgentSkillFromNote({
+				sourcePath,
+				slashId: slashId || undefined,
+				skillPath: skillPath || undefined,
+			});
+		});
 		this.startAcpPrewarm();
+	}
+
+	private safeDecodeUriParam(s: string): string {
+		try {
+			return decodeURIComponent(s.replace(/\+/g, " "));
+		} catch {
+			return s;
+		}
+	}
+
+	/**
+	 * Target for a markdown link so Live Preview / Reading treat it as a normal clickable link
+	 * (custom HTML tags are often shown as code instead).
+	 */
+	buildCursorAgentInvokeUri(sourceFile: TFile, entry: CatalogEntry): string {
+		const v = encodeURIComponent(this.app.vault.getName());
+		const f = encodeURIComponent(sourceFile.path);
+		if (entry.kind === "skill" && entry.skillPath?.length) {
+			return `obsidian://cursoragent?vault=${v}&file=${f}&skill=${encodeURIComponent(entry.skillPath)}`;
+		}
+		return `obsidian://cursoragent?vault=${v}&file=${f}&slash=${encodeURIComponent(entry.slashId)}`;
+	}
+
+	/**
+	 * Resolve a skill path or slash id from the catalog, open the chat, add a tab, and send
+	 * with the note at `sourcePath` as context (Reading view / preview source).
+	 */
+	async invokeAgentSkillFromNote(input: {
+		sourcePath: string;
+		slashId?: string;
+		skillPath?: string;
+	}): Promise<void> {
+		const { skills, commands } = await this.getSkillCatalog();
+		let entry =
+			(input.skillPath?.trim() ? findSkillByPath(skills, input.skillPath.trim()) : null) ??
+			(input.slashId?.trim() ? findEntryBySlashId(skills, commands, input.slashId.trim()) : null);
+		if (!entry) {
+			new Notice("Unknown Cursor skill or command — check spelling or refresh skills.");
+			return;
+		}
+		const abs = this.app.vault.getAbstractFileByPath(input.sourcePath);
+		const note = abs instanceof TFile ? abs : null;
+		const payload = await buildInvocationPayload(this.app, entry);
+		await this.activateView();
+		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CURSOR_AGENT);
+		const view = leaves[0]?.view;
+		if (!(view instanceof CursorChatView)) {
+			new Notice("Could not open Cursor Agent chat.");
+			return;
+		}
+		await view.startNewChatFromNote(note, payload);
 	}
 
 	onunload(): void {
@@ -370,6 +486,7 @@ export class CursorAgentPlugin extends Plugin {
 		if (!this.persistedSnapshot && fromChat) {
 			this.persistedSnapshot = fromChat;
 		}
+		this.invalidateSkillCatalog();
 		await this.saveData(this.buildPluginDataObjectForDisk());
 	}
 

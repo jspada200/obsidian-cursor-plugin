@@ -22,6 +22,8 @@ export interface CursorAgentSettings {
 	agentFileLog: boolean;
 	/** Include longer RPC payloads and prompt excerpts in the log (may contain note text). */
 	agentLogVerbose: boolean;
+	/** Extra directories to scan for SKILL.md (one path per line), in addition to the vault and ~/.cursor/skills. */
+	extraSkillScanDirs: string;
 }
 
 export const DEFAULT_SETTINGS: CursorAgentSettings = {
@@ -37,4 +39,5 @@ export const DEFAULT_SETTINGS: CursorAgentSettings = {
 	maxContextTabs: 16,
 	agentFileLog: true,
 	agentLogVerbose: false,
+	extraSkillScanDirs: "",
 };

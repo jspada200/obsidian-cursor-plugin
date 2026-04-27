@@ -1,4 +1,4 @@
-import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import { buildVaultContextBlock, searchNotesByNameOrTag } from "../context/buildContext";
 import type { CursorAgentPlugin, PersistedChatTabs } from "../plugin";
 import { normalizeAgentMode, type AgentMode } from "../settings";
@@ -22,6 +22,12 @@ import {
 } from "../util/chatNoteExport";
 import { titleFromFirstUserMessage } from "../util/tabTitle";
 import { expandVaultNoteLineMarkers, tryOpenTranscriptVaultLink } from "../util/assistantVaultLinks";
+import {
+	buildInvocationPayload,
+	filterCatalog,
+	type CatalogEntry,
+	type InvocationPayload,
+} from "../skills/catalog";
 
 export const VIEW_TYPE_CURSOR_AGENT = "cursor-agent-chat-view";
 
@@ -35,9 +41,22 @@ export class CursorChatView extends ItemView {
 	modelOptions: ModelOption[] = [];
 	private composeEl: HTMLTextAreaElement | null = null;
 	private transcriptEl: HTMLDivElement | null = null;
+	/** Scroll area for messages; height is flex-fill or user-set via vertical split grip. */
+	private transcriptWrapEl: HTMLDivElement | null = null;
+	/** Column: transcript wrap + grip + composer. */
+	private bodyEl: HTMLDivElement | null = null;
+	private composerOuterEl: HTMLDivElement | null = null;
+	private bodyResizeObserver: ResizeObserver | null = null;
 	private tabsRowEl: HTMLDivElement | null = null;
 	private mentionEl: HTMLDivElement | null = null;
 	private mentionStart = -1;
+	private slashPopoverEl: HTMLDivElement | null = null;
+	private slashStart = -1;
+	private slashQuery = "";
+	private slashSkillsShow = 5;
+	private slashCommandsShow = 5;
+	private slashHighlightFlat = 0;
+	private slashFlatRows: CatalogEntry[] = [];
 	private modelSelectRef: HTMLSelectElement | null = null;
 	private modeSelectRef: HTMLSelectElement | null = null;
 	private transcriptRenderPending = false;
@@ -104,20 +123,36 @@ export class CursorChatView extends ItemView {
 		/* Prewarm or reconnect may be in progress before first send — show steps from the same ACP phase signals as cursor-agent.log */
 		this.syncLoadBanner();
 
-		this.transcriptEl = root.createDiv({ cls: "cursor-agent-transcript" });
+		const body = root.createDiv({ cls: "cursor-agent-main" });
+		this.bodyEl = body;
+		const transcriptWrap = body.createDiv({ cls: "cursor-agent-transcript-wrap" });
+		this.transcriptWrapEl = transcriptWrap;
+		this.transcriptEl = transcriptWrap.createDiv({ cls: "cursor-agent-transcript" });
 
-		const composerWrap = root.createDiv({ cls: "cursor-agent-composer-outer" });
+		const vsplitGrip = body.createDiv({
+			cls: "cursor-agent-vsplit-grip",
+			attr: { "aria-label": "Drag to resize chat and input area", role: "separator" },
+		});
+		this.attachTranscriptSplitResize(vsplitGrip);
+
+		const composerWrap = body.createDiv({ cls: "cursor-agent-composer-outer" });
+		this.composerOuterEl = composerWrap;
 		const surface = composerWrap.createDiv({ cls: "cursor-agent-composer-surface" });
 		this.mentionEl = surface.createDiv({ cls: "cursor-agent-mention-popover hidden" });
+		this.slashPopoverEl = surface.createDiv({ cls: "cursor-agent-slash-popover hidden" });
 		this.composeEl = surface.createEl("textarea", {
 			cls: "cursor-agent-composer-input",
-			attr: { placeholder: "Message, @ to mention a note" },
+			attr: { placeholder: "Message, @ note, / skill or command" },
 		});
 		this.composeEl.addEventListener("input", () => {
 			this.adjustComposerHeight();
-			this.onComposerInput();
+			this.syncComposerPopovers();
 		});
 		this.composeEl.addEventListener("keydown", (e) => {
+			if (this.handleComposerKeydown(e)) {
+				e.preventDefault();
+				return;
+			}
 			if (e.key === "Enter" && !e.shiftKey) {
 				e.preventDefault();
 				void this.sendMessage();
@@ -167,6 +202,88 @@ export class CursorChatView extends ItemView {
 		this.renderTranscript();
 		this.adjustComposerHeight();
 		this.applyStagedSessionIdForFirstTabFromPlugin();
+
+		this.bodyResizeObserver = new ResizeObserver(() => this.clampTranscriptSplitToBody());
+		this.bodyResizeObserver.observe(body);
+
+		const savedSplit = localStorage.getItem(this.transcriptSplitStorageKey());
+		if (savedSplit) {
+			const px = parseInt(savedSplit, 10);
+			if (Number.isFinite(px) && px >= 80) {
+				requestAnimationFrame(() => {
+					this.applyTranscriptSplitHeight(px);
+					this.adjustComposerHeight();
+				});
+			}
+		}
+	}
+
+	private transcriptSplitStorageKey(): string {
+		return `${this.plugin.manifest.id}:transcript-split-px`;
+	}
+
+	private applyTranscriptSplitHeight(px: number): void {
+		const wrap = this.transcriptWrapEl;
+		const body = this.bodyEl;
+		const composer = this.composerOuterEl;
+		if (!wrap || !body || !composer || body.clientHeight < 80) return;
+		const GRIP = 6;
+		const minT = 100;
+		const maxT = Math.max(minT, body.clientHeight - composer.offsetHeight - GRIP);
+		const h = Math.max(minT, Math.min(maxT, px));
+		wrap.addClass("is-fixed-height");
+		wrap.style.height = `${h}px`;
+		wrap.style.flexGrow = "0";
+		wrap.style.flexShrink = "0";
+	}
+
+	private clampTranscriptSplitToBody(): void {
+		const wrap = this.transcriptWrapEl;
+		const body = this.bodyEl;
+		const composer = this.composerOuterEl;
+		if (!wrap || !body || !composer || !wrap.hasClass("is-fixed-height")) return;
+		const GRIP = 6;
+		const minT = 100;
+		const maxT = Math.max(minT, body.clientHeight - composer.offsetHeight - GRIP);
+		if (wrap.offsetHeight > maxT) {
+			wrap.style.height = `${maxT}px`;
+			localStorage.setItem(this.transcriptSplitStorageKey(), String(Math.round(maxT)));
+		}
+	}
+
+	private attachTranscriptSplitResize(grip: HTMLElement): void {
+		grip.addEventListener("mousedown", (e) => {
+			e.preventDefault();
+			const wrap = this.transcriptWrapEl;
+			const body = this.bodyEl;
+			const composer = this.composerOuterEl;
+			if (!wrap || !body || !composer) return;
+			const startY = e.clientY;
+			const startH = wrap.getBoundingClientRect().height;
+			const GRIP = 6;
+			const minT = 100;
+
+			const onMove = (ev: MouseEvent) => {
+				const dy = ev.clientY - startY;
+				let h = startH + dy;
+				const maxT = Math.max(minT, body.clientHeight - composer.offsetHeight - GRIP);
+				h = Math.max(minT, Math.min(maxT, h));
+				wrap.addClass("is-fixed-height");
+				wrap.style.height = `${h}px`;
+				wrap.style.flexGrow = "0";
+				wrap.style.flexShrink = "0";
+			};
+			const onUp = () => {
+				document.removeEventListener("mousemove", onMove);
+				document.removeEventListener("mouseup", onUp);
+				localStorage.setItem(
+					this.transcriptSplitStorageKey(),
+					String(Math.round(wrap.getBoundingClientRect().height))
+				);
+			};
+			document.addEventListener("mousemove", onMove);
+			document.addEventListener("mouseup", onUp);
+		});
 	}
 
 	/**
@@ -257,9 +374,10 @@ export class CursorChatView extends ItemView {
 		const el = this.composeEl;
 		if (!el) return;
 		el.style.height = "auto";
-		const max = 200;
-		const min = 44;
+		const max = 320;
+		const min = 76;
 		el.style.height = `${Math.min(max, Math.max(min, el.scrollHeight))}px`;
+		this.clampTranscriptSplitToBody();
 	}
 
 	async onModeOrModelChanged(): Promise<void> {
@@ -598,26 +716,73 @@ export class CursorChatView extends ItemView {
 		this.transcriptEl.scrollTop = this.transcriptEl.scrollHeight;
 	}
 
-	private onComposerInput(): void {
+	private syncComposerPopovers(): void {
+		const el = this.composeEl;
+		if (!el) return;
+		const pos = el.selectionStart;
+		const text = el.value.slice(0, pos);
+		const atTrigger = this.tryMentionTrigger(text);
+		const slashTrigger = this.trySlashTrigger(text);
+		let use: "mention" | "slash" | null = null;
+		if (atTrigger && slashTrigger) {
+			use = atTrigger.start >= slashTrigger.start ? "mention" : "slash";
+		} else if (atTrigger) use = "mention";
+		else if (slashTrigger) use = "slash";
+
+		if (use === "mention") {
+			this.hideSlashPopover();
+			this.renderMentionPopover(atTrigger!);
+			return;
+		}
+		if (use === "slash") {
+			this.hideMentionPopover();
+			this.slashStart = slashTrigger!.start;
+			this.slashQuery = slashTrigger!.query;
+			this.slashSkillsShow = 5;
+			this.slashCommandsShow = 5;
+			this.slashHighlightFlat = 0;
+			void this.renderSlashPopover();
+			return;
+		}
+		this.hideMentionPopover();
+		this.hideSlashPopover();
+	}
+
+	private tryMentionTrigger(text: string): { start: number; query: string } | null {
+		const at = text.lastIndexOf("@");
+		if (at < 0 || (at > 0 && !/\s/.test(text[at - 1]!))) return null;
+		const q = text.slice(at + 1);
+		if (/\s/.test(q)) return null;
+		return { start: at, query: q };
+	}
+
+	private trySlashTrigger(text: string): { start: number; query: string } | null {
+		const slash = text.lastIndexOf("/");
+		if (slash < 0 || (slash > 0 && !/\s/.test(text[slash - 1]!))) return null;
+		const q = text.slice(slash + 1);
+		if (/\s/.test(q)) return null;
+		return { start: slash, query: q };
+	}
+
+	private hideMentionPopover(): void {
+		this.mentionEl?.addClass("hidden");
+		this.mentionStart = -1;
+	}
+
+	private hideSlashPopover(): void {
+		this.slashPopoverEl?.addClass("hidden");
+		this.slashStart = -1;
+		this.slashFlatRows = [];
+	}
+
+	private renderMentionPopover(trigger: { start: number; query: string }): void {
 		const el = this.composeEl;
 		const pop = this.mentionEl;
 		if (!el || !pop) return;
-		const pos = el.selectionStart;
-		const text = el.value.slice(0, pos);
-		const at = text.lastIndexOf("@");
-		if (at < 0 || (at > 0 && !/\s/.test(text[at - 1]))) {
-			pop.addClass("hidden");
-			return;
-		}
-		const q = text.slice(at + 1);
-		if (/\s/.test(q)) {
-			pop.addClass("hidden");
-			return;
-		}
-		this.mentionStart = at;
+		this.mentionStart = trigger.start;
 		pop.removeClass("hidden");
 		pop.empty();
-		const hits = searchNotesByNameOrTag(this.app, q, 12);
+		const hits = searchNotesByNameOrTag(this.app, trigger.query, 12);
 		if (hits.length === 0) {
 			pop.createDiv({ text: "No matches", cls: "cursor-agent-mention-empty" });
 			return;
@@ -625,6 +790,227 @@ export class CursorChatView extends ItemView {
 		for (const f of hits) {
 			const row = pop.createDiv({ cls: "cursor-agent-mention-item", text: f.path });
 			row.addEventListener("click", () => this.insertMention(f.path));
+		}
+	}
+
+	private async renderSlashPopover(): Promise<void> {
+		const pop = this.slashPopoverEl;
+		if (!pop) return;
+		let cat: { skills: CatalogEntry[]; commands: CatalogEntry[] };
+		try {
+			cat = await this.plugin.getSkillCatalog();
+		} catch (e) {
+			console.error("[Cursor Agent] skill catalog", e);
+			new Notice("Could not load skill catalog.", 6000);
+			return;
+		}
+		const { skills: sf, commands: cf } = filterCatalog(cat.skills, cat.commands, this.slashQuery);
+		pop.removeClass("hidden");
+		pop.empty();
+		pop.setAttr("role", "listbox");
+
+		const skillSlice = sf.slice(0, this.slashSkillsShow);
+		const cmdSlice = cf.slice(0, this.slashCommandsShow);
+
+		const flat: CatalogEntry[] = [...skillSlice, ...cmdSlice];
+		this.slashFlatRows = flat;
+		if (this.slashHighlightFlat >= flat.length) this.slashHighlightFlat = Math.max(0, flat.length - 1);
+
+		const addSection = (
+			which: "skills" | "commands",
+			label: string,
+			rows: CatalogEntry[],
+			total: number,
+			flatOffset: number
+		) => {
+			const sec = pop.createDiv({ cls: "cursor-agent-slash-section" });
+			sec.createDiv({ cls: "cursor-agent-slash-section-hdr", text: label });
+			if (rows.length === 0) {
+				sec.createDiv({ cls: "cursor-agent-slash-empty", text: "No matches" });
+			} else {
+				for (let i = 0; i < rows.length; i++) {
+					const row = rows[i]!;
+					const globalIdx = flatOffset + i;
+					const active = globalIdx === this.slashHighlightFlat;
+					const wrap = sec.createDiv({
+						cls: "cursor-agent-slash-row" + (active ? " is-active" : ""),
+					});
+					const main = wrap.createDiv({ cls: "cursor-agent-slash-row-main" });
+					main.createSpan({ cls: "cursor-agent-slash-id", text: row.slashId });
+					if (active) main.createSpan({ cls: "cursor-agent-slash-enter", text: "↵" });
+					wrap.createDiv({ cls: "cursor-agent-slash-row-desc", text: row.description });
+					wrap.addEventListener("mouseenter", () => {
+						this.slashHighlightFlat = globalIdx;
+						void this.renderSlashPopover();
+					});
+					wrap.addEventListener("mousedown", (ev) => {
+						ev.preventDefault();
+						void this.applySlashEntry(row);
+					});
+				}
+			}
+			const more = total - rows.length;
+			if (more > 0) {
+				const btn = sec.createEl("button", {
+					cls: "cursor-agent-slash-more",
+					text: `Show ${more} more`,
+					attr: { type: "button" },
+				});
+				btn.addEventListener("click", (ev) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					if (which === "skills") this.slashSkillsShow = total;
+					else this.slashCommandsShow = total;
+					void this.renderSlashPopover();
+				});
+			}
+		};
+
+		addSection("skills", "Skills", skillSlice, sf.length, 0);
+		addSection("commands", "Commands", cmdSlice, cf.length, skillSlice.length);
+	}
+
+	private handleComposerKeydown(e: KeyboardEvent): boolean {
+		const slashOpen = this.slashPopoverEl && !this.slashPopoverEl.hasClass("hidden");
+		const mentionOpen = this.mentionEl && !this.mentionEl.hasClass("hidden");
+
+		if (slashOpen && this.slashFlatRows.length > 0) {
+			if (e.key === "Escape") {
+				this.hideSlashPopover();
+				return true;
+			}
+			if (e.key === "ArrowDown") {
+				this.slashHighlightFlat = Math.min(this.slashFlatRows.length - 1, this.slashHighlightFlat + 1);
+				void this.renderSlashPopover();
+				return true;
+			}
+			if (e.key === "ArrowUp") {
+				this.slashHighlightFlat = Math.max(0, this.slashHighlightFlat - 1);
+				void this.renderSlashPopover();
+				return true;
+			}
+			if (e.key === "Enter" && !e.shiftKey) {
+				const row = this.slashFlatRows[this.slashHighlightFlat];
+				if (row) void this.applySlashEntry(row);
+				return true;
+			}
+		}
+
+		if (mentionOpen && e.key === "Escape") {
+			this.hideMentionPopover();
+			return true;
+		}
+
+		return false;
+	}
+
+	private async applySlashEntry(entry: CatalogEntry): Promise<void> {
+		const el = this.composeEl;
+		if (!el || this.slashStart < 0) return;
+		const payload = await buildInvocationPayload(this.app, entry);
+		const before = el.value.slice(0, this.slashStart);
+		const after = el.value.slice(el.selectionStart);
+		el.value = before + payload.userText + after;
+		const caret = (before + payload.userText).length;
+		el.setSelectionRange(caret, caret);
+		this.hideSlashPopover();
+		this.adjustComposerHeight();
+	}
+
+	/** New chat tab and send with context from a vault note (e.g. markdown invoke). */
+	async startNewChatFromNote(contextNote: TFile | null, payload: InvocationPayload): Promise<void> {
+		this.addTab(false);
+		if (this.composeEl) this.composeEl.value = "";
+		this.adjustComposerHeight();
+		await this.sendUserTurn({
+			userText: payload.userText,
+			contextActiveFile: contextNote,
+			mergeExplicitPaths: payload.explicitPaths,
+			externalSkillPaths: payload.externalPaths,
+		});
+	}
+
+	private async sendUserTurn(args: {
+		userText: string;
+		contextActiveFile: TFile | null;
+		mergeExplicitPaths?: Set<string>;
+		externalSkillPaths?: string[];
+		clearComposer?: boolean;
+	}): Promise<void> {
+		const tab = this.activeTab();
+		const el = this.composeEl;
+		if (!tab) return;
+		const userText = args.userText.trim();
+		if (!userText) return;
+
+		if (tab.tabTitleSource === "default" && !tab.messages.some((m) => m.role === "user")) {
+			tab.title = titleFromFirstUserMessage(userText);
+			tab.tabTitleSource = "auto";
+			this.renderTabs();
+		}
+
+		const mentions = this.extractMentionPaths(userText);
+		if (args.mergeExplicitPaths) {
+			for (const p of args.mergeExplicitPaths) mentions.add(p);
+		}
+
+		const preamble = buildVaultContextBlock(this.app, args.contextActiveFile, {
+			includeOpenTabs: this.plugin.settings.includeOpenTabs,
+			includeLinkedNotes: this.plugin.settings.includeLinkedNotes,
+			maxTabs: this.plugin.settings.maxContextTabs,
+			maxLinks: this.plugin.settings.maxContextLinks,
+			explicitPaths: mentions,
+			externalSkillPaths: args.externalSkillPaths?.length ? args.externalSkillPaths : undefined,
+		});
+
+		tab.messages.push({ role: "user", content: userText });
+		if (args.clearComposer !== false && el) {
+			el.value = "";
+			this.adjustComposerHeight();
+		}
+		this.hideSlashPopover();
+		this.hideMentionPopover();
+		this.renderTranscript();
+		void this.flushPersist();
+
+		try {
+			await this.plugin.waitForPrewarmAndInitialBootstrap();
+			this.setRequestPhase("none");
+			this.plugin.agentLog.ui(
+				`sendUserTurn userTextChars=${userText.length} mentions=${mentions.size} preambleChars=${preamble.length}`
+			);
+			await this.plugin.ensureAcp(this, this.mode, this.model);
+			const acp = this.plugin.acp;
+			if (!acp) throw new Error("ACP not initialized");
+
+			if (!tab.acpSessionId) {
+				this.setRequestPhase("session_new");
+				const vaultRoot = getVaultOsPath(this.app);
+				if (!vaultRoot) throw new Error("No vault OS path");
+				const { sessionId } = await acp.sessionNew(vaultRoot);
+				tab.acpSessionId = sessionId;
+				this.plugin.agentLog.ui(`session/new ok sessionId=${sessionId}`);
+			}
+
+			this.setRequestPhase("awaiting_first_reply");
+			this.pendingFirstReplySessionId = tab.acpSessionId!;
+
+			const full = [{ type: "text" as const, text: preamble + userText }];
+			await acp.sessionPrompt(tab.acpSessionId, full);
+			this.plugin.agentLog.ui("session/prompt RPC finished (await returned)");
+			if (this.requestPhase === "awaiting_first_reply") {
+				this.setRequestPhase("none");
+			}
+			await this.flushPersist();
+		} catch (e) {
+			this.setRequestPhase("none");
+			const msg = e instanceof Error ? e.message : String(e);
+			this.plugin.agentLog.line("ui/error", msg);
+			console.error("[Cursor Agent]", e);
+			new Notice("Cursor Agent error: " + msg, 20000);
+			tab.messages.push({ role: "system", content: "Error: " + msg });
+			this.renderTranscript();
+			void this.flushPersist();
 		}
 	}
 
@@ -638,8 +1024,8 @@ export class CursorChatView extends ItemView {
 		el.value = before + insert + after;
 		const caret = (before + insert).length;
 		el.setSelectionRange(caret, caret);
-		pop.addClass("hidden");
-		this.mentionStart = -1;
+		this.hideMentionPopover();
+		this.hideSlashPopover();
 	}
 
 	private extractMentionPaths(text: string): Set<string> {
@@ -857,81 +1243,25 @@ export class CursorChatView extends ItemView {
 	}
 
 	async sendMessage(): Promise<void> {
-		const tab = this.activeTab();
 		const el = this.composeEl;
-		if (!tab || !el) return;
+		if (!el) return;
 		const userText = el.value.trim();
 		if (!userText) return;
-
-		/* One-time tab title from the first line of the first user message. */
-		if (tab.tabTitleSource === "default" && !tab.messages.some((m) => m.role === "user")) {
-			tab.title = titleFromFirstUserMessage(userText);
-			tab.tabTitleSource = "auto";
-			this.renderTabs();
-		}
-
-		const activeFile = this.app.workspace.getActiveFile();
-		const mentions = this.extractMentionPaths(userText);
-		const preamble = buildVaultContextBlock(this.app, activeFile, {
-			includeOpenTabs: this.plugin.settings.includeOpenTabs,
-			includeLinkedNotes: this.plugin.settings.includeLinkedNotes,
-			maxTabs: this.plugin.settings.maxContextTabs,
-			maxLinks: this.plugin.settings.maxContextLinks,
-			explicitPaths: mentions,
+		await this.sendUserTurn({
+			userText,
+			contextActiveFile: this.app.workspace.getActiveFile(),
+			clearComposer: true,
 		});
-
-		tab.messages.push({ role: "user", content: userText });
-		el.value = "";
-		this.adjustComposerHeight();
-		this.renderTranscript();
-		void this.flushPersist();
-
-		try {
-			await this.plugin.waitForPrewarmAndInitialBootstrap();
-			this.setRequestPhase("none");
-			this.plugin.agentLog.ui(
-				`sendMessage userTextChars=${userText.length} mentions=${mentions.size} preambleChars=${preamble.length}`
-			);
-			await this.plugin.ensureAcp(this, this.mode, this.model);
-			const acp = this.plugin.acp;
-			if (!acp) throw new Error("ACP not initialized");
-
-			if (!tab.acpSessionId) {
-				this.setRequestPhase("session_new");
-				const vaultRoot = getVaultOsPath(this.app);
-				if (!vaultRoot) throw new Error("No vault OS path");
-				const { sessionId } = await acp.sessionNew(vaultRoot);
-				tab.acpSessionId = sessionId;
-				this.plugin.agentLog.ui(`session/new ok sessionId=${sessionId}`);
-			}
-
-			/* Stays up until the first non-skip session/update (30s+ cold start is common). */
-			this.setRequestPhase("awaiting_first_reply");
-			this.pendingFirstReplySessionId = tab.acpSessionId!;
-
-			const full = [{ type: "text" as const, text: preamble + userText }];
-			await acp.sessionPrompt(tab.acpSessionId, full);
-			this.plugin.agentLog.ui("session/prompt RPC finished (await returned)");
-			/* If no stream events arrived, clear the banner. */
-			if (this.requestPhase === "awaiting_first_reply") {
-				this.setRequestPhase("none");
-			}
-			await this.flushPersist();
-		} catch (e) {
-			this.setRequestPhase("none");
-			const msg = e instanceof Error ? e.message : String(e);
-			this.plugin.agentLog.line("ui/error", msg);
-			console.error("[Cursor Agent]", e);
-			new Notice("Cursor Agent error: " + msg, 20000);
-			tab.messages.push({ role: "system", content: "Error: " + msg });
-			this.renderTranscript();
-			void this.flushPersist();
-		}
 	}
 
 	async onClose(): Promise<void> {
 		window.clearTimeout(this.persistDebounceHandle);
 		this.persistDebounceHandle = 0;
+		this.bodyResizeObserver?.disconnect();
+		this.bodyResizeObserver = null;
+		this.bodyEl = null;
+		this.transcriptWrapEl = null;
+		this.composerOuterEl = null;
 		this.setRequestPhase("none");
 		this.plugin.setAcpChatView(null);
 		await this.flushPersist();
